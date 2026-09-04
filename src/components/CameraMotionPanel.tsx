@@ -26,7 +26,7 @@ interface CameraMotionPanelProps {
   camera: {
     state: CameraPlayerState;
     play: (trajectoryId?: string) => void;
-    pause: () => void;
+    pause: (trajectoryId?: string) => void;
     stop: () => void;
     reset: () => void;
     setLoop: (loop: boolean) => void;
@@ -56,24 +56,17 @@ export function CameraMotionPanel({ handheld, camera, orbitCenterUi }: CameraMot
     setSpeed,
     setCustomWaypoints,
     setCustomCloseLoop,
-    playCustomSphere,
     selectSphereWaypoint,
     setWalkWaypoints,
     setWalkCloseLoop,
-    playCustomWalk,
     selectWalkWaypoint,
     toggleHandheld,
     setHandheldIntensity,
     setHandheldFrequency,
   } = camera;
 
-  const activeTrajectoryLabel = useMemo(() => {
-    if (!state.trajectoryId) return null;
-    if (state.trajectoryId === CUSTOM_TRAJECTORY_ID) return CUSTOM_TRAJECTORY_LABEL;
-    if (state.trajectoryId === WALK_TRAJECTORY_ID) return WALK_TRAJECTORY_LABEL;
-    return null;
-  }, [state.trajectoryId]);
-
+  // Focus flags — which editor is currently "selected" via trajectoryId.
+  // Playing state is tracked independently per-track (spherePlaying / walkPlaying).
   const activeTrajectoryIsCustom = state.trajectoryId === CUSTOM_TRAJECTORY_ID;
   const activeTrajectoryIsWalk = state.trajectoryId === WALK_TRAJECTORY_ID;
 
@@ -101,15 +94,19 @@ export function CameraMotionPanel({ handheld, camera, orbitCenterUi }: CameraMot
     return null;
   };
 
-  const durationLabel = useMemo(() => {
-    if (activeTrajectoryIsCustom) {
-      const n = state.customWaypoints.length;
-      if (n <= 1) return 'static';
-      const ms = Math.max(3000, n * 1600);
-      return `${(ms / 1000).toFixed(1)}s`;
-    }
-    return '—';
-  }, [activeTrajectoryIsCustom, state.customWaypoints.length]);
+  const sphereDurationLabel = useMemo(() => {
+    const n = state.customWaypoints.length;
+    if (n <= 1) return 'static';
+    const ms = Math.max(3000, n * 1600);
+    return `${(ms / 1000).toFixed(1)}s`;
+  }, [state.customWaypoints.length]);
+
+  const walkDurationLabel = useMemo(() => {
+    const n = state.walkWaypoints.length;
+    if (n <= 1) return 'static';
+    const ms = Math.max(3000, n * 1800);
+    return `${(ms / 1000).toFixed(1)}s`;
+  }, [state.walkWaypoints.length]);
 
   return (
     <section className="macos-card p-3">
@@ -118,10 +115,16 @@ export function CameraMotionPanel({ handheld, camera, orbitCenterUi }: CameraMot
         <span
           className={[
             'chip',
-            state.playing || handheld.playing ? '!border-accent-blue !text-fg-bright' : '',
+            state.spherePlaying || state.walkPlaying || handheld.playing
+              ? '!border-accent-blue !text-fg-bright'
+              : '',
           ].join(' ')}
         >
-          {state.playing || handheld.playing ? 'Active' : state.trajectoryId ? 'Paused' : 'Idle'}
+          {state.spherePlaying || state.walkPlaying || handheld.playing
+            ? 'Active'
+            : state.customWaypoints.length > 0 || state.walkWaypoints.length > 0
+            ? 'Paused'
+            : 'Idle'}
         </span>
       </div>
 
@@ -145,9 +148,9 @@ export function CameraMotionPanel({ handheld, camera, orbitCenterUi }: CameraMot
         }
         getActiveRig={getActiveRig}
         rigToSphere={rigToSphere}
-        currentProgress={state.progress}
+        currentProgress={state.sphereProgress}
         currentRig={state.trajectoryRig}
-        playing={state.playing}
+        playing={state.spherePlaying}
         selectedWaypointId={state.selectedSphereWaypointId}
         onAddWaypoint={(lat, lon) => {
           const wp = makeSphereWaypoint(lat, lon, 1);
@@ -230,7 +233,7 @@ export function CameraMotionPanel({ handheld, camera, orbitCenterUi }: CameraMot
           setCustomWaypoints([]);
         }}
         onToggleCloseLoop={(v) => setCustomCloseLoop(v)}
-        onPlayCustom={playCustomSphere}
+        onPlayCustom={() => play(CUSTOM_TRAJECTORY_ID)}
       />
 
       {/* ------- Walk-through trajectory editor ------- */}
@@ -238,8 +241,8 @@ export function CameraMotionPanel({ handheld, camera, orbitCenterUi }: CameraMot
         waypoints={state.walkWaypoints}
         closeLoop={state.walkCloseLoop}
         isWalkActive={activeTrajectoryIsWalk}
-        playing={state.playing}
-        currentProgress={state.progress}
+        playing={state.walkPlaying}
+        currentProgress={state.walkProgress}
         selectedWaypointId={state.selectedWalkWaypointId}
         onSelectWaypoint={selectWalkWaypoint}
         onAddWaypoint={(x, y, z) => {
@@ -285,46 +288,104 @@ export function CameraMotionPanel({ handheld, camera, orbitCenterUi }: CameraMot
         }
         onClearWaypoints={() => setWalkWaypoints([])}
         onToggleCloseLoop={(v) => setWalkCloseLoop(v)}
-        onPlayWalk={playCustomWalk}
+        onPlayWalk={() => play(WALK_TRAJECTORY_ID)}
       />
 
-      {/* ------- Active trajectory summary ------- */}
-      {activeTrajectoryLabel && (
-        <div className="mb-3">
-          <div className="field-label">
-            <span>
-              {activeTrajectoryLabel}
-              <span className="ml-2 font-mono text-fg-muted">
-                {(state.progress * 100).toFixed(0)}%
-              </span>
+      {/* ------- Dual trajectory progress: Sphere Custom ------- */}
+      <div className="mb-3">
+        <div className="field-label">
+          <span className="flex min-w-0 items-center gap-2 flex-wrap">
+            <span>Sphere Custom</span>
+            <button
+              type="button"
+              onClick={() =>
+                state.spherePlaying
+                  ? pause(CUSTOM_TRAJECTORY_ID)
+                  : play(CUSTOM_TRAJECTORY_ID)
+              }
+              disabled={state.customWaypoints.length === 0}
+              className={[
+                'inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium tracking-wide transition-colors',
+                state.spherePlaying
+                  ? 'border-accent-blue bg-accent-blue text-bg-deep'
+                  : state.customWaypoints.length > 0
+                  ? 'border-accent-blue/60 text-fg-bright'
+                  : 'border-border-soft text-fg-dim',
+              ].join(' ')}
+            >
+              {state.spherePlaying ? '▶ Sphere' : '❚❚ Paused'}
+            </button>
+            <span className="font-mono text-fg-muted">
+              {(state.sphereProgress * 100).toFixed(0)}%
             </span>
-            <span className="field-value">
-              {activeTrajectoryIsCustom
-                ? state.customCloseLoop
-                  ? 'Loop'
-                  : 'Open path'
-                : 'Play'}
-            </span>
-          </div>
-          <div className="h-1 w-full overflow-hidden rounded-full bg-border-soft">
-            <div
-              className="h-full bg-white transition-[width] duration-75"
-              style={{
-                width: `${Math.max(0, Math.min(1, state.progress)) * 100}%`,
-              }}
-            />
-          </div>
-          <p className="mt-1.5 text-[10px] leading-relaxed text-fg-muted">
-            {activeTrajectoryIsCustom
-              ? `Your ${state.customWaypoints.length}-waypoint spherical path. Duration auto: ${durationLabel}. Works together with Handheld Shake above.`
-              : activeTrajectoryIsWalk
-              ? `Your ${state.walkWaypoints.length}-waypoint walk-through path. Camera moves and rotates at each waypoint. Works with Handheld Shake.`
-              : ''}
-          </p>
+          </span>
+          <span className="field-value">
+            {state.customCloseLoop ? 'Loop' : 'Open path'}
+          </span>
         </div>
-      )}
+        <div className="h-1 w-full overflow-hidden rounded-full bg-border-soft">
+          <div
+            className="h-full bg-white transition-[width] duration-75"
+            style={{
+              width: `${Math.max(0, Math.min(1, state.sphereProgress)) * 100}%`,
+            }}
+          />
+        </div>
+        <p className="mt-1.5 text-[10px] leading-relaxed text-fg-muted">
+          Your {state.customWaypoints.length}-waypoint spherical path. Duration
+          auto: {sphereDurationLabel}. Runs alongside Walk Path and Handheld
+          Shake.
+        </p>
+      </div>
 
-      {/* ------- Global playback controls (Sphere Custom trajectory only) ------- */}
+      {/* ------- Dual trajectory progress: Walk Path ------- */}
+      <div className="mb-3">
+        <div className="field-label">
+          <span className="flex min-w-0 items-center gap-2 flex-wrap">
+            <span>{WALK_TRAJECTORY_LABEL}</span>
+            <button
+              type="button"
+              onClick={() =>
+                state.walkPlaying
+                  ? pause(WALK_TRAJECTORY_ID)
+                  : play(WALK_TRAJECTORY_ID)
+              }
+              disabled={state.walkWaypoints.length === 0}
+              className={[
+                'inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium tracking-wide transition-colors',
+                state.walkPlaying
+                  ? 'border-accent-blue bg-accent-blue text-bg-deep'
+                  : state.walkWaypoints.length > 0
+                  ? 'border-accent-blue/60 text-fg-bright'
+                  : 'border-border-soft text-fg-dim',
+              ].join(' ')}
+            >
+              {state.walkPlaying ? '▶ Walk' : '❚❚ Paused'}
+            </button>
+            <span className="font-mono text-fg-muted">
+              {(state.walkProgress * 100).toFixed(0)}%
+            </span>
+          </span>
+          <span className="field-value">
+            {state.walkCloseLoop ? 'Loop' : 'Open path'}
+          </span>
+        </div>
+        <div className="h-1 w-full overflow-hidden rounded-full bg-border-soft">
+          <div
+            className="h-full bg-white transition-[width] duration-75"
+            style={{
+              width: `${Math.max(0, Math.min(1, state.walkProgress)) * 100}%`,
+            }}
+          />
+        </div>
+        <p className="mt-1.5 text-[10px] leading-relaxed text-fg-muted">
+          Your {state.walkWaypoints.length}-waypoint walk-through path. Duration
+          auto: {walkDurationLabel}. Camera moves/rotates at each waypoint. Runs
+          independently from Sphere Custom and Handheld Shake.
+        </p>
+      </div>
+
+      {/* ------- Global playback controls (shared: affects focused track) ------- */}
       <div className="mb-3">
         <div className="field-label">
           <span>Speed · Sphere Path</span>
@@ -352,8 +413,8 @@ export function CameraMotionPanel({ handheld, camera, orbitCenterUi }: CameraMot
         </button>
         <button
           type="button"
-          onClick={pause}
-          disabled={!state.playing}
+          onClick={() => pause()}
+          disabled={!state.spherePlaying && !state.walkPlaying}
           className="btn h-10"
         >
           Pause

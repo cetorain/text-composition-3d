@@ -80,9 +80,15 @@ interface HistorySnapshot {
   walkWaypoints: WalkWaypoint[];
   walkCloseLoop: boolean;
   selectedId: string | null;
+  // Legacy single-track camera state (preserved for cross-version loads)
   cameraTrajectoryId: string | null;
   cameraPlaying: boolean;
   cameraProgress: number;
+  // Dual-track camera state (source of truth for new snapshots)
+  cameraSpherePlaying?: boolean;
+  cameraSphereProgress?: number;
+  cameraWalkPlaying?: boolean;
+  cameraWalkProgress?: number;
   handheldEnabled: boolean;
   handheldPlaying: boolean;
   handheldTimeMs: number;
@@ -181,9 +187,15 @@ export default function App() {
       walkWaypoints: camera.state.walkWaypoints,
       walkCloseLoop: camera.state.walkCloseLoop,
       selectedId,
+      // Legacy fields for backward compat of old HistorySnapshots on disk
       cameraTrajectoryId: camera.state.trajectoryId,
       cameraPlaying: camera.state.playing,
       cameraProgress: camera.state.progress,
+      // Dual-track: these are the source of truth going forward.
+      cameraSpherePlaying: camera.state.spherePlaying,
+      cameraSphereProgress: camera.state.sphereProgress,
+      cameraWalkPlaying: camera.state.walkPlaying,
+      cameraWalkProgress: camera.state.walkProgress,
       handheldEnabled: camera.state.handheldEnabled,
       handheldPlaying: camera.state.handheldPlaying,
       handheldTimeMs: camera.state.handheldTimeMs,
@@ -205,6 +217,10 @@ export default function App() {
     camera.state.trajectoryId,
     camera.state.playing,
     camera.state.progress,
+    camera.state.spherePlaying,
+    camera.state.sphereProgress,
+    camera.state.walkPlaying,
+    camera.state.walkProgress,
     camera.state.handheldEnabled,
     camera.state.handheldPlaying,
     camera.state.handheldTimeMs,
@@ -254,6 +270,8 @@ export default function App() {
       camera.setCustomCloseLoop(s.customCloseLoop);
       camera.setWalkWaypoints(s.walkWaypoints);
       camera.setWalkCloseLoop(s.walkCloseLoop);
+      // Pass legacy 9 args first (for the function signature), then the new
+      // dual-track fields as source of truth.
       camera.restorePlayerSnapshot(
         s.cameraTrajectoryId,
         s.cameraPlaying,
@@ -264,6 +282,11 @@ export default function App() {
         s.handheldSettings,
         s.walkWaypoints,
         s.walkCloseLoop,
+        // Dual-track override fields (priority 1)
+        s.cameraSpherePlaying,
+        s.cameraSphereProgress,
+        s.cameraWalkPlaying,
+        s.cameraWalkProgress,
       );
     } finally {
       // Defer so any setState listeners triggered in the same microtask
@@ -785,22 +808,21 @@ export default function App() {
     [camera, pushUndo],
   );
 
-  const cameraHasTrajectory =
-    !!camera.state.trajectoryId &&
-    (camera.state.trajectoryId === CUSTOM_TRAJECTORY_ID
-      ? camera.state.customWaypoints.length > 0
-      : camera.state.trajectoryId === WALK_TRAJECTORY_ID
-      ? camera.state.walkWaypoints.length > 0
-      : true);
-  const cameraRunning = !!cameraHasTrajectory && camera.state.playing;
+  // DUAL-TRACK: Sphere Custom + Walk Path can run simultaneously now, so
+  // "has trajectory" means "has waypoints on either track".
+  const hasSphere = camera.state.customWaypoints.length > 0;
+  const hasWalk = camera.state.walkWaypoints.length > 0;
+  const sphereRunning = hasSphere && camera.state.spherePlaying;
+  const walkRunning = hasWalk && camera.state.walkPlaying;
   const handheldActive = camera.state.handheldEnabled;
   const handheldRunning = handheldActive && camera.state.handheldPlaying;
   const animatedCount = useMemo(() => {
     let c = layers.filter((l) => l.animation !== 'none').length;
-    if (cameraHasTrajectory) c += 1;
+    if (hasSphere) c += 1;
+    if (hasWalk) c += 1;
     if (handheldActive) c += 1; // Handheld Shake counts as its own motion layer
     return c;
-  }, [layers, cameraHasTrajectory, handheldActive]);
+  }, [layers, hasSphere, hasWalk, handheldActive]);
 
   /**
    * Orbit anchor for camera motion. No matter where the headline text lives on
@@ -863,18 +885,21 @@ export default function App() {
     const layerRunning = layers.filter(
       (l) => l.animation !== 'none' && !pausedLayerIds.has(l.id),
     ).length;
-    return layerRunning + (cameraRunning ? 1 : 0) + (handheldRunning ? 1 : 0);
-  }, [layers, pausedLayerIds, cameraRunning, handheldRunning]);
+    // Both tracks count independently when running.
+    const trackRunning = (sphereRunning ? 1 : 0) + (walkRunning ? 1 : 0);
+    return layerRunning + trackRunning + (handheldRunning ? 1 : 0);
+  }, [layers, pausedLayerIds, sphereRunning, walkRunning, handheldRunning]);
   const pausedCount = useMemo(() => {
     const layerPaused = layers.filter(
       (l) => l.animation !== 'none' && pausedLayerIds.has(l.id),
     ).length;
-    // "Paused" camera = trajectory exists but not playing.
-    // "Paused" handheld = enabled but handheldPlaying=false (soft-paused).
-    const camPaused = cameraHasTrajectory && !camera.state.playing ? 1 : 0;
-    const hhPaused = handheldActive && !camera.state.handheldPlaying ? 1 : 0;
+    // Per-track paused = has waypoints but NOT playing for that track.
+    const camPaused =
+      (hasSphere && !sphereRunning ? 1 : 0) +
+      (hasWalk && !walkRunning ? 1 : 0);
+    const hhPaused = handheldActive && !handheldRunning ? 1 : 0;
     return layerPaused + camPaused + hhPaused;
-  }, [layers, pausedLayerIds, cameraHasTrajectory, camera.state.playing, handheldActive, camera.state.handheldPlaying]);
+  }, [layers, pausedLayerIds, hasSphere, hasWalk, sphereRunning, walkRunning, handheldActive, handheldRunning]);
   const layerPausedCount = useMemo(
     () =>
       layers.filter((l) => l.animation !== 'none' && pausedLayerIds.has(l.id))
@@ -892,10 +917,16 @@ export default function App() {
   /* ---------- Export PNG ---------- */
   const savedAnimationsRef = useRef<AnimationType[] | null>(null);
   const savedCameraRef = useRef<{
+    // Legacy compat
     trajectoryId: string | null;
     playing: boolean;
     progress: number;
-    rig: CameraRig;
+    rig: unknown;
+    // Dual-track
+    spherePlaying: boolean;
+    sphereProgress: number;
+    walkPlaying: boolean;
+    walkProgress: number;
   } | null>(null);
 
   /**
@@ -966,6 +997,10 @@ export default function App() {
         playing: camera.state.playing,
         progress: camera.state.progress,
         rig: camera.state.rig,
+        spherePlaying: camera.state.spherePlaying,
+        sphereProgress: camera.state.sphereProgress,
+        walkPlaying: camera.state.walkPlaying,
+        walkProgress: camera.state.walkProgress,
       };
       setLayers((prev) => prev.map((l) => ({ ...l, animation: 'none' })));
       camera.stop();
@@ -1018,9 +1053,15 @@ export default function App() {
       }
       const savedCam = savedCameraRef.current;
       savedCameraRef.current = null;
-      if (savedCam && savedCam.trajectoryId) {
-        // eslint-disable-next-line no-unsafe-finally
-        camera.play(savedCam.trajectoryId);
+      if (savedCam) {
+        if (savedCam.spherePlaying) {
+          // eslint-disable-next-line no-unsafe-finally
+          camera.play(CUSTOM_TRAJECTORY_ID);
+        }
+        if (savedCam.walkPlaying) {
+          // eslint-disable-next-line no-unsafe-finally
+          camera.play(WALK_TRAJECTORY_ID);
+        }
       }
       setExporting(false);
     }
@@ -1038,17 +1079,15 @@ export default function App() {
       if (dur) durations.push(dur);
     }
 
-    // Camera trajectory
-    if (camera.state.playing && camera.state.trajectoryId) {
-      if (camera.state.trajectoryId === CUSTOM_TRAJECTORY_ID) {
-        const n = camera.state.customWaypoints.length;
-        durations.push(n <= 1 ? 1000 : Math.max(3000, n * 1600));
-      } else if (camera.state.trajectoryId === WALK_TRAJECTORY_ID) {
-        const n = camera.state.walkWaypoints.length;
-        durations.push(n <= 1 ? 1000 : Math.max(3000, n * 1800));
-      } else {
-        durations.push(4000);
-      }
+    // Camera tracks — independent. When both run we take the LONGEST so both
+    // tracks can be shown in a single exported loop.
+    if (sphereRunning) {
+      const n = camera.state.customWaypoints.length;
+      durations.push(n <= 1 ? 1000 : Math.max(3000, n * 1600));
+    }
+    if (walkRunning) {
+      const n = camera.state.walkWaypoints.length;
+      durations.push(n <= 1 ? 1000 : Math.max(3000, n * 1800));
     }
 
     // Handheld is continuous noise — no fixed loop, but if it's the only
@@ -1346,7 +1385,7 @@ export default function App() {
     };
 
     let restoreBgUrls: null | (() => void) = null;
-    let camRestart: null | { traj: string | null; handheld: boolean } = null;
+    let camRestart: null | { sphere: boolean; walk: boolean; handheld: boolean } = null;
 
     // Fully-isolated per-frame rasterizer. NEVER throws — returns null on fail.
     //
@@ -1468,12 +1507,15 @@ export default function App() {
       } catch { /* noop */ }
 
       // ==== Pause & remember live motion state ====
-      const wasCamPlaying = !!camera.state.playing;
-      const wasCamTraj = camera.state.trajectoryId || null;
+      // DUAL-TRACK: remember each track independently so we can restart the
+      // correct ones after export.
+      const wasSpherePlaying = !!camera.state.spherePlaying;
+      const wasWalkPlaying = !!camera.state.walkPlaying;
       const wasHandheldPlaying = !!camera.state.handheldPlaying;
-      try { if (wasCamPlaying) camera.pause(); } catch { /* noop */ }
+      try { if (wasSpherePlaying) camera.pause(CUSTOM_TRAJECTORY_ID); } catch { /* noop */ }
+      try { if (wasWalkPlaying) camera.pause(WALK_TRAJECTORY_ID); } catch { /* noop */ }
       try { camera.pauseHandheld(); } catch { /* noop */ }
-      camRestart = { traj: wasCamTraj, handheld: wasHandheldPlaying };
+      camRestart = { sphere: wasSpherePlaying, walk: wasWalkPlaying, handheld: wasHandheldPlaying };
 
       // ==== Freeze layer CSS animations (drive per-frame via -delay) ====
       const ANIM_DURATIONS_MAP: Record<string, number> = {
@@ -1783,7 +1825,8 @@ export default function App() {
       if (camRestart) {
         try {
           if (camRestart.handheld) camera.resumeHandheld();
-          if (camRestart.traj) camera.play(camRestart.traj);
+          if (camRestart.sphere) camera.play(CUSTOM_TRAJECTORY_ID);
+          if (camRestart.walk) camera.play(WALK_TRAJECTORY_ID);
         } catch { /* noop */ }
         camRestart = null;
       }
@@ -2068,22 +2111,29 @@ export default function App() {
                   ].join(' ')}
                 >
                   {layerRunningCount > 0 ? `▶ T${layerRunningCount}` : null}
-                  {cameraRunning ? ` · ▶ 📷` : null}
+                  {sphereRunning ? ` · ▶ Sphere` : null}
+                  {walkRunning ? ` · ▶ Walk` : null}
                   {handheldRunning ? ` · ▶ H` : null}
-                  {(layerRunningCount > 0 || cameraRunning || handheldRunning) &&
+                  {(layerRunningCount > 0 || sphereRunning || walkRunning || handheldRunning) &&
                   (layerPausedCount > 0 ||
-                    (cameraHasTrajectory && !camera.state.playing) ||
+                    (hasSphere && !camera.state.spherePlaying) ||
+                    (hasWalk && !camera.state.walkPlaying) ||
                     (handheldActive && !camera.state.handheldPlaying))
                     ? ' · '
                     : null}
                   {layerPausedCount > 0 ? `❚❚ T${layerPausedCount}` : null}
-                  {cameraHasTrajectory && !camera.state.playing
-                    ? layerPausedCount > 0
-                      ? ' · ❚❚ 📷'
-                      : '❚❚ 📷'
+                  {hasSphere && !camera.state.spherePlaying
+                    ? layerPausedCount > 0 || (hasWalk && !camera.state.walkPlaying)
+                      ? ' · ❚❚ Sphere'
+                      : '❚❚ Sphere'
+                    : null}
+                  {hasWalk && !camera.state.walkPlaying
+                    ? layerPausedCount + (hasSphere && !camera.state.spherePlaying ? 1 : 0) > 0
+                      ? ' · ❚❚ Walk'
+                      : '❚❚ Walk'
                     : null}
                   {handheldActive && !camera.state.handheldPlaying
-                    ? layerPausedCount + (cameraHasTrajectory && !camera.state.playing ? 1 : 0) > 0
+                    ? layerPausedCount + (hasSphere && !camera.state.spherePlaying ? 1 : 0) + (hasWalk && !camera.state.walkPlaying ? 1 : 0) > 0
                       ? ' · ❚❚ H'
                       : '❚❚ H'
                     : null}

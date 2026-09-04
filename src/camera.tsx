@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+﻿import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 /**
  * A "camera rig" for the 2D-CSS-3D poster.
@@ -559,15 +559,45 @@ export type CameraTrajectory = {
 
 /* -------------- Animation driver hook -------------- */
 
+const SPHERE_DURATION_MIN = 3000;
+const SPHERE_DURATION_PER_WP = 1600;
+const WALK_DURATION_MIN = 3000;
+const WALK_DURATION_PER_WP = 1800;
+
+export function sphereDurationMs(n: number): number {
+  return n <= 1 ? 1000 : Math.max(SPHERE_DURATION_MIN, n * SPHERE_DURATION_PER_WP);
+}
+export function walkDurationMs(n: number): number {
+  return n <= 1 ? 1000 : Math.max(WALK_DURATION_MIN, n * WALK_DURATION_PER_WP);
+}
+
 export interface CameraPlayerState {
-  // Sphere Custom trajectory selection + progress
+  // Legacy single-track fields — kept for back-compat with current consumers.
+  // - trajectoryId: currently focused track (CUSTOM_TRAJECTORY_ID / WALK_TRAJECTORY_ID / null).
+  //   Used by the UI to know which editor's progress bar to highlight; no longer
+  //   the sole "which motion is playing" flag.
+  // - playing: true if EITHER track is playing (back-compat boolean).
+  // - progress: the active-trajectory progress (for legacy UI components).
   trajectoryId: string | null;
   playing: boolean;
   loop: boolean;
-  speed: number; // 0.25x .. 4x
+  speed: number; // 0.25x .. 4x (shared — sphere + walk use the same speed knob)
   progress: number;
-  /** Live evaluated rig for trajectory (BEFORE handheld overlay). */
+  /** Legacy combined trajectory rig — kept for consumers that read state.trajectoryRig
+   *  (equals walk ⊕ sphere; walk treated as base because it provides pan/z/dolly).
+   *  New code should read state.sphereRig + state.walkRig individually. */
   trajectoryRig: CameraRig;
+
+  // ---- Dual independent tracks ----
+  /** Sphere Custom (rotations only) — when there are waypoints. */
+  sphereRig: CameraRig;
+  spherePlaying: boolean;
+  sphereProgress: number; // 0..1
+  /** Walk Path (pan + z + dolly + rotations) — when there are waypoints. */
+  walkRig: CameraRig;
+  walkPlaying: boolean;
+  walkProgress: number; // 0..1
+
   /** Handheld status + settings (independent toggled layer). */
   handheldEnabled: boolean;
   handheldPlaying: boolean;
@@ -576,7 +606,7 @@ export interface CameraPlayerState {
   handheldTimeMs: number;
   /** Snapshot of the handheld layer evaluated at handheldTimeMs. */
   handheldRig: CameraRig;
-  /** finalRig = composeRigs(trajectoryRig, handheldRig) — what PreviewCanvas uses. */
+  /** finalRig = combine(walkRig, sphereRig, handheldRig) — what PreviewCanvas uses. */
   rig: CameraRig;
   customWaypoints: SphereWaypoint[];
   customCloseLoop: boolean;
@@ -589,20 +619,41 @@ export interface CameraPlayerState {
   selectedSphereWaypointId: string | null;
 }
 
-function combineRigState(
-  trajectoryRig: CameraRig,
+/**
+ * Walk (pan + z + dolly + look-angles) is the "base" camera; Sphere Custom
+ * (orbit rotation around Headline) is an additive overlay. Handheld noise sits
+ * on top. So the final camera rig = handheld(compose(sphere(compose(walk, id))))
+ * which is equivalent to:
+ *   orbit  = walk.orbit  + sphere.orbit  + handheld.orbit
+ *   pan    = walk.pan    + sphere.pan    + handheld.pan   (sphere.pan is 0 today
+ *                                                         but kept for generality)
+ *   z      = walk.z      + sphere.z      + handheld.z     (sphere.z 0 today)
+ *   dolly  = walk.dolly  × sphere.dolly  × handheld.dolly (sphere.dolly 1 today)
+ *   persp  = walk.persp if non-default, else sphere.persp if non-default, else HH
+ */
+function combineFinalRig(
+  walkRig: CameraRig,
+  sphereRig: CameraRig,
   handheldEnabled: boolean,
   handheldRig: CameraRig,
 ): CameraRig {
-  return handheldEnabled
-    ? composeRigs(trajectoryRig, handheldRig)
-    : trajectoryRig;
+  const withSphere = composeRigs(walkRig, sphereRig);
+  return handheldEnabled ? composeRigs(withSphere, handheldRig) : withSphere;
+}
+
+function combineTrajectoryRig(
+  walkRig: CameraRig,
+  sphereRig: CameraRig,
+): CameraRig {
+  return composeRigs(walkRig, sphereRig);
 }
 
 export function useCameraPlayer() {
   const [state, setState] = useState<CameraPlayerState>(() => {
-    const trajRig = DEFAULT_CAMERA;
     const hhRig = evaluateHandheld(0, DEFAULT_HANDHELD);
+    const sphereRig = { ...DEFAULT_CAMERA };
+    const walkRig = { ...DEFAULT_CAMERA };
+    const trajRig = combineTrajectoryRig(walkRig, sphereRig);
     return {
       trajectoryId: null,
       playing: false,
@@ -610,12 +661,18 @@ export function useCameraPlayer() {
       speed: 1,
       progress: 0,
       trajectoryRig: trajRig,
+      sphereRig,
+      spherePlaying: false,
+      sphereProgress: 0,
+      walkRig,
+      walkPlaying: false,
+      walkProgress: 0,
       handheldEnabled: false,
       handheldPlaying: false,
       handheldSettings: { ...DEFAULT_HANDHELD },
       handheldTimeMs: 0,
       handheldRig: hhRig,
-      rig: combineRigState(trajRig, false, hhRig),
+      rig: combineFinalRig(walkRig, sphereRig, false, hhRig),
       customWaypoints: [],
       customCloseLoop: true,
       walkWaypoints: [],
@@ -627,8 +684,9 @@ export function useCameraPlayer() {
 
   const rafRef = useRef<number | null>(null);
   const startRef = useRef<number>(0);
-  const elapsedRef = useRef<number>(0); // for trajectory (ms)
-  const hhElapsedRef = useRef<number>(0); // for handheld (ms)
+  const sphereElapsedRef = useRef<number>(0);
+  const walkElapsedRef = useRef<number>(0);
+  const hhElapsedRef = useRef<number>(0);
   const stateRef = useRef(state);
   stateRef.current = state;
 
@@ -641,37 +699,20 @@ export function useCameraPlayer() {
 
   const needLoop = useCallback((): boolean => {
     const s = stateRef.current;
-    if (s.playing && s.trajectoryId) return true;
+    if (s.spherePlaying) return true;
+    if (s.walkPlaying) return true;
     if (s.handheldEnabled && s.handheldPlaying) return true;
     return false;
   }, []);
 
-  const evaluateTrajectoryRig = useCallback(
-    (s: CameraPlayerState, progress: number): CameraRig => {
-      if (s.trajectoryId === CUSTOM_TRAJECTORY_ID) {
-        return evaluateCustomTrajectory(
-          s.customWaypoints,
-          Math.min(1, Math.max(0, progress)),
-          s.customCloseLoop,
-        );
-      }
-      if (s.trajectoryId === WALK_TRAJECTORY_ID) {
-        return evaluateWalkTrajectory(
-          s.walkWaypoints,
-          Math.min(1, Math.max(0, progress)),
-          s.walkCloseLoop,
-        );
-      }
-      // No other trajectories built-in anymore (see note above CAMERA_TRAJECTORIES).
-      return DEFAULT_CAMERA;
-    },
-    [],
-  );
-
   const tick = useCallback(
     (now: number) => {
       const prev = stateRef.current;
-      if (!prev.playing && !prev.handheldPlaying) {
+      if (
+        !prev.spherePlaying &&
+        !prev.walkPlaying &&
+        !prev.handheldPlaying
+      ) {
         rafRef.current = null;
         return;
       }
@@ -679,81 +720,156 @@ export function useCameraPlayer() {
       if (!startRef.current) startRef.current = now;
       const dt = now - startRef.current;
       startRef.current = now;
+      const speed = Math.max(0.25, prev.speed);
 
-      // --- Advance trajectory clock ---
-      let elapsedTraj = elapsedRef.current;
-      let nextProgress = prev.progress;
-      let shouldStopTraj = false;
-      if (prev.playing && prev.trajectoryId) {
-        const dtTraj = dt * prev.speed;
-        elapsedTraj += dtTraj;
-        let duration: number;
-        let loopable: boolean;
-        if (prev.trajectoryId === CUSTOM_TRAJECTORY_ID) {
-          loopable = prev.customCloseLoop || prev.customWaypoints.length >= 2;
-          duration =
-            prev.customWaypoints.length <= 1
-              ? 1000
-              : Math.max(3000, prev.customWaypoints.length * 1600);
-        } else if (prev.trajectoryId === WALK_TRAJECTORY_ID) {
-          loopable = prev.walkCloseLoop || prev.walkWaypoints.length >= 2;
-          duration =
-            prev.walkWaypoints.length <= 1
-              ? 1000
-              : Math.max(3000, prev.walkWaypoints.length * 1800);
-        } else {
-          duration = 4000;
-          loopable = true;
-        }
-        let t = elapsedTraj / duration;
+      // --- Advance sphere clock ---
+      let sphereElapsed = sphereElapsedRef.current;
+      let nextSphereProgress = prev.sphereProgress;
+      let sphereShouldStop = false;
+      if (prev.spherePlaying && prev.customWaypoints.length > 0) {
+        const dtTraj = dt * speed;
+        sphereElapsed += dtTraj;
+        const n = prev.customWaypoints.length;
+        const duration = sphereDurationMs(n);
+        const loopable = prev.customCloseLoop || n >= 2;
+        let t = sphereElapsed / duration;
         if (t >= 1) {
           if (prev.loop && loopable) {
             const wrapT = t - Math.floor(t);
-            elapsedTraj = wrapT * duration;
-            nextProgress = wrapT;
+            sphereElapsed = wrapT * duration;
+            nextSphereProgress = wrapT;
           } else {
-            nextProgress = 1;
-            elapsedTraj = duration;
-            shouldStopTraj = true;
+            nextSphereProgress = 1;
+            sphereElapsed = duration;
+            sphereShouldStop = true;
           }
         } else {
-          nextProgress = t;
+          nextSphereProgress = t;
         }
       }
 
-      // --- Advance handheld clock (always when handheldPlaying, independent) ---
-      let hhElapsed = hhElapsedRef.current;
-      if (prev.handheldEnabled && prev.handheldPlaying) {
-        hhElapsed += dt;
+      // --- Advance walk clock (INDEPENDENT from sphere) ---
+      let walkElapsed = walkElapsedRef.current;
+      let nextWalkProgress = prev.walkProgress;
+      let walkShouldStop = false;
+      if (prev.walkPlaying && prev.walkWaypoints.length > 0) {
+        const dtTraj = dt * speed;
+        walkElapsed += dtTraj;
+        const n = prev.walkWaypoints.length;
+        const duration = walkDurationMs(n);
+        const loopable = prev.walkCloseLoop || n >= 2;
+        let t = walkElapsed / duration;
+        if (t >= 1) {
+          if (prev.loop && loopable) {
+            const wrapT = t - Math.floor(t);
+            walkElapsed = wrapT * duration;
+            nextWalkProgress = wrapT;
+          } else {
+            nextWalkProgress = 1;
+            walkElapsed = duration;
+            walkShouldStop = true;
+          }
+        } else {
+          nextWalkProgress = t;
+        }
       }
+
+      // --- Advance handheld clock ---
+      let hhElapsed = hhElapsedRef.current;
+      if (prev.handheldEnabled && prev.handheldPlaying) hhElapsed += dt;
       const hhRig = prev.handheldEnabled
         ? evaluateHandheld(hhElapsed, prev.handheldSettings)
         : { ...DEFAULT_CAMERA };
 
-      const trajRig = evaluateTrajectoryRig(prev, nextProgress);
+      // --- Evaluate rigs ---
+      // Waypoint-selection overrides take precedence over the playing progress.
+      const selSphere = prev.selectedSphereWaypointId
+        ? prev.customWaypoints.find((w) => w.id === prev.selectedSphereWaypointId)
+        : null;
+      const selWalk = prev.selectedWalkWaypointId
+        ? prev.walkWaypoints.find((w) => w.id === prev.selectedWalkWaypointId)
+        : null;
+      const nextSphereRig =
+        selSphere && !prev.spherePlaying
+          ? rigFromSpherePoint(selSphere)
+          : prev.customWaypoints.length > 0
+          ? evaluateCustomTrajectory(
+              prev.customWaypoints,
+              Math.min(1, Math.max(0, nextSphereProgress)),
+              prev.customCloseLoop,
+            )
+          : { ...DEFAULT_CAMERA };
+      const nextWalkRig =
+        selWalk && !prev.walkPlaying
+          ? rigFromWalkPoint(selWalk)
+          : prev.walkWaypoints.length > 0
+          ? evaluateWalkTrajectory(
+              prev.walkWaypoints,
+              Math.min(1, Math.max(0, nextWalkProgress)),
+              prev.walkCloseLoop,
+            )
+          : { ...DEFAULT_CAMERA };
 
-      elapsedRef.current = elapsedTraj;
+      sphereElapsedRef.current = sphereElapsed;
+      walkElapsedRef.current = walkElapsed;
       hhElapsedRef.current = hhElapsed;
 
-      const finalRig = combineRigState(trajRig, prev.handheldEnabled, hhRig);
+      const nextTrajRig = combineTrajectoryRig(nextWalkRig, nextSphereRig);
+      const finalRig = combineFinalRig(
+        nextWalkRig,
+        nextSphereRig,
+        prev.handheldEnabled,
+        hhRig,
+      );
+
+      // Focused progress follows whichever track is currently focused via
+      // trajectoryId (or walk if both running, else sphere).
+      const focusedProgress =
+        prev.trajectoryId === CUSTOM_TRAJECTORY_ID
+          ? nextSphereProgress
+          : prev.trajectoryId === WALK_TRAJECTORY_ID
+          ? nextWalkProgress
+          : prev.walkPlaying
+          ? nextWalkProgress
+          : nextSphereProgress;
+
+      const eitherPlaying =
+        (prev.spherePlaying && !sphereShouldStop) ||
+        (prev.walkPlaying && !walkShouldStop);
 
       setState((s) => ({
         ...s,
-        progress: Math.min(1, Math.max(0, nextProgress)),
-        trajectoryRig: trajRig,
+        sphereProgress: Math.min(1, Math.max(0, nextSphereProgress)),
+        walkProgress: Math.min(1, Math.max(0, nextWalkProgress)),
+        progress: Math.min(1, Math.max(0, focusedProgress)),
+        sphereRig: nextSphereRig,
+        walkRig: nextWalkRig,
+        trajectoryRig: nextTrajRig,
         handheldTimeMs: hhElapsed,
         handheldRig: hhRig,
         rig: finalRig,
-        playing: shouldStopTraj ? false : s.playing,
+        spherePlaying: sphereShouldStop ? false : s.spherePlaying,
+        walkPlaying: walkShouldStop ? false : s.walkPlaying,
+        playing: eitherPlaying,
       }));
 
-      if (shouldStopTraj && !(prev.handheldEnabled && prev.handheldPlaying)) {
-        rafRef.current = null;
-        return;
+      if (
+        !sphereShouldStop ||
+        !walkShouldStop ||
+        (prev.handheldEnabled && prev.handheldPlaying)
+      ) {
+        const keepGoing =
+          (!sphereShouldStop && prev.spherePlaying) ||
+          (!walkShouldStop && prev.walkPlaying) ||
+          (prev.handheldEnabled && prev.handheldPlaying);
+        if (keepGoing) {
+          rafRef.current = requestAnimationFrame(tick);
+          return;
+        }
       }
-      rafRef.current = requestAnimationFrame(tick);
+      rafRef.current = null;
     },
-    [evaluateTrajectoryRig],
+    [],
   );
 
   /* ---------- Handheld controls ---------- */
@@ -766,7 +882,7 @@ export function useCameraPlayer() {
       const hhRig = enabled
         ? evaluateHandheld(hhElapsedRef.current, prev.handheldSettings)
         : { ...DEFAULT_CAMERA };
-      const rig = combineRigState(prev.trajectoryRig, enabled, hhRig);
+      const rig = combineFinalRig(prev.walkRig, prev.sphereRig, enabled, hhRig);
       return {
         ...prev,
         handheldEnabled: enabled,
@@ -784,7 +900,7 @@ export function useCameraPlayer() {
       const hhRig = enabled
         ? evaluateHandheld(hhElapsedRef.current, prev.handheldSettings)
         : { ...DEFAULT_CAMERA };
-      const rig = combineRigState(prev.trajectoryRig, enabled, hhRig);
+      const rig = combineFinalRig(prev.walkRig, prev.sphereRig, enabled, hhRig);
       return {
         ...prev,
         handheldEnabled: enabled,
@@ -806,7 +922,7 @@ export function useCameraPlayer() {
         ...prev,
         handheldSettings: settings,
         handheldRig: hhRig,
-        rig: combineRigState(prev.trajectoryRig, prev.handheldEnabled, hhRig),
+        rig: combineFinalRig(prev.walkRig, prev.sphereRig, prev.handheldEnabled, hhRig),
       };
     });
   }, []);
@@ -822,7 +938,7 @@ export function useCameraPlayer() {
         ...prev,
         handheldSettings: settings,
         handheldRig: hhRig,
-        rig: combineRigState(prev.trajectoryRig, prev.handheldEnabled, hhRig),
+        rig: combineFinalRig(prev.walkRig, prev.sphereRig, prev.handheldEnabled, hhRig),
       };
     });
   }, []);
@@ -842,56 +958,149 @@ export function useCameraPlayer() {
     });
   }, []);
 
-  /* ---------- Trajectory controls ---------- */
+  /* ---------- Trajectory controls (dual-track: sphere + walk are INDEPENDENT) ---------- */
 
+  /**
+   * Generic "Play X" call. When a trajectoryId is provided:
+   * - CUSTOM: starts (or restarts) the Sphere Custom track.
+   * - WALK: starts (or restarts) the Walk Path track.
+   * Calling both back-to-back (e.g. play(Sphere) then play(Walk)) is valid and
+   * results in both tracks running simultaneously — their rigs are composed.
+   * When called with NO argument: replay whichever track currently has focus via
+   * `trajectoryId`; if both tracks have waypoints, replay the focused track
+   * only (the other keeps its current state).
+   */
   const play = useCallback((trajectoryId?: string) => {
     setState((prev) => {
-      const nextId = trajectoryId ?? prev.trajectoryId;
-      if (!nextId) return prev;
-      if (nextId === CUSTOM_TRAJECTORY_ID) {
-        if (prev.customWaypoints.length === 0) return prev;
-      } else if (nextId === WALK_TRAJECTORY_ID) {
-        if (prev.walkWaypoints.length === 0) return prev;
-      } else {
-        return prev;
-      }
-      if (trajectoryId && trajectoryId !== prev.trajectoryId) {
-        elapsedRef.current = 0;
-      }
+      const focusId = trajectoryId ?? prev.trajectoryId;
+      const wantSphere =
+        focusId === CUSTOM_TRAJECTORY_ID || focusId == null
+          ? prev.customWaypoints.length > 0
+          : false;
+      const wantWalk =
+        focusId === WALK_TRAJECTORY_ID
+          ? prev.walkWaypoints.length > 0
+          : false;
+      if (!wantSphere && !wantWalk) return prev;
+
+      const nextSphereProgress = wantSphere ? 0 : prev.sphereProgress;
+      const nextWalkProgress = wantWalk ? 0 : prev.walkProgress;
+      if (wantSphere) sphereElapsedRef.current = 0;
+      if (wantWalk) walkElapsedRef.current = 0;
       startRef.current = 0;
-      let trajRig: CameraRig;
-      if (nextId === WALK_TRAJECTORY_ID) {
-        trajRig = evaluateWalkTrajectory(prev.walkWaypoints, 0, prev.walkCloseLoop);
-      } else {
-        trajRig = evaluateCustomTrajectory(prev.customWaypoints, 0, prev.customCloseLoop);
-      }
+
+      const selSphere = prev.selectedSphereWaypointId
+        ? prev.customWaypoints.find((w) => w.id === prev.selectedSphereWaypointId)
+        : null;
+      const selWalk = prev.selectedWalkWaypointId
+        ? prev.walkWaypoints.find((w) => w.id === prev.selectedWalkWaypointId)
+        : null;
+      const nextSphereRig =
+        wantSphere && selSphere && prev.spherePlaying === false
+          ? rigFromSpherePoint(selSphere)
+          : prev.customWaypoints.length > 0
+          ? evaluateCustomTrajectory(
+              prev.customWaypoints,
+              nextSphereProgress,
+              prev.customCloseLoop,
+            )
+          : { ...DEFAULT_CAMERA };
+      const nextWalkRig =
+        wantWalk && selWalk && prev.walkPlaying === false
+          ? rigFromWalkPoint(selWalk)
+          : prev.walkWaypoints.length > 0
+          ? evaluateWalkTrajectory(
+              prev.walkWaypoints,
+              nextWalkProgress,
+              prev.walkCloseLoop,
+            )
+          : { ...DEFAULT_CAMERA };
+
+      const nextTrajRig = combineTrajectoryRig(nextWalkRig, nextSphereRig);
+      const nextFocusId: string | null =
+        focusId ?? (wantWalk ? WALK_TRAJECTORY_ID : CUSTOM_TRAJECTORY_ID);
       return {
         ...prev,
-        trajectoryRig: trajRig,
-        trajectoryId: nextId,
-        playing: true,
-        progress: 0,
-        selectedWalkWaypointId: null,
-        selectedSphereWaypointId: null,
-        rig: combineRigState(trajRig, prev.handheldEnabled, prev.handheldRig),
+        trajectoryId: nextFocusId,
+        spherePlaying: wantSphere ? true : prev.spherePlaying,
+        walkPlaying: wantWalk ? true : prev.walkPlaying,
+        playing:
+          (wantSphere ? true : prev.spherePlaying) ||
+          (wantWalk ? true : prev.walkPlaying),
+        sphereProgress: nextSphereProgress,
+        walkProgress: nextWalkProgress,
+        progress:
+          nextFocusId === WALK_TRAJECTORY_ID
+            ? nextWalkProgress
+            : nextSphereProgress,
+        sphereRig: nextSphereRig,
+        walkRig: nextWalkRig,
+        trajectoryRig: nextTrajRig,
+        selectedSphereWaypointId: wantSphere ? null : prev.selectedSphereWaypointId,
+        selectedWalkWaypointId: wantWalk ? null : prev.selectedWalkWaypointId,
+        rig: combineFinalRig(
+          nextWalkRig,
+          nextSphereRig,
+          prev.handheldEnabled,
+          prev.handheldRig,
+        ),
       };
     });
   }, []);
 
-  const pause = useCallback(() => {
+  /**
+   * Pause — behaviour:
+   * If no trajectoryId given: pause exactly one track. If exactly one track
+   * is playing, pause it. If both tracks are running, pause the one focused
+   * by `trajectoryId`.
+   * If an explicit trajectoryId (CUSTOM_TRAJECTORY_ID or WALK_TRAJECTORY_ID)
+   * is given: pause ONLY that track (useful before export when you want to
+   * preserve the state of the other track).
+   */
+  const pause = useCallback((trajectoryId?: string) => {
     setState((prev) => {
-      if (!prev.playing) return prev;
-      return { ...prev, playing: false };
+      if (!prev.spherePlaying && !prev.walkPlaying) return prev;
+      if (trajectoryId === CUSTOM_TRAJECTORY_ID) {
+        if (!prev.spherePlaying) return prev;
+        return { ...prev, spherePlaying: false, playing: prev.walkPlaying };
+      }
+      if (trajectoryId === WALK_TRAJECTORY_ID) {
+        if (!prev.walkPlaying) return prev;
+        return { ...prev, walkPlaying: false, playing: prev.spherePlaying };
+      }
+      // No explicit id → single-track behaviour.
+      if (prev.spherePlaying && !prev.walkPlaying) {
+        return { ...prev, spherePlaying: false, playing: false };
+      }
+      if (prev.walkPlaying && !prev.spherePlaying) {
+        return { ...prev, walkPlaying: false, playing: false };
+      }
+      // Both running — pause focused track only.
+      if (prev.trajectoryId === CUSTOM_TRAJECTORY_ID) {
+        return { ...prev, spherePlaying: false, playing: prev.walkPlaying };
+      }
+      if (prev.trajectoryId === WALK_TRAJECTORY_ID) {
+        return { ...prev, walkPlaying: false, playing: prev.spherePlaying };
+      }
+      return { ...prev, spherePlaying: false, playing: prev.walkPlaying };
     });
   }, []);
 
-  /** Soft-pause for global "Pause All Motion". */
+  /** Soft-pause for global "Pause All Motion" — always pauses both tracks. */
   const softPause = useCallback(() => {
     setState((prev) => {
-      if (!prev.playing && !prev.handheldPlaying) return prev;
+      if (
+        !prev.spherePlaying &&
+        !prev.walkPlaying &&
+        !prev.handheldPlaying
+      ) {
+        return prev;
+      }
       return {
         ...prev,
-        playing: prev.playing ? false : prev.playing,
+        spherePlaying: false,
+        walkPlaying: false,
+        playing: false,
         handheldPlaying: prev.handheldPlaying ? false : prev.handheldPlaying,
       };
     });
@@ -899,34 +1108,50 @@ export function useCameraPlayer() {
 
   const softResume = useCallback(() => {
     setState((prev) => {
-      const needTrajStart =
-        (prev.trajectoryId === CUSTOM_TRAJECTORY_ID && prev.customWaypoints.length > 0) ||
-        (prev.trajectoryId === WALK_TRAJECTORY_ID && prev.walkWaypoints.length > 0);
       return {
         ...prev,
-        playing: prev.trajectoryId ? (needTrajStart ? true : prev.playing) : prev.playing,
+        spherePlaying: prev.customWaypoints.length > 0 ? true : prev.spherePlaying,
+        walkPlaying: prev.walkWaypoints.length > 0 ? true : prev.walkPlaying,
+        playing:
+          (prev.customWaypoints.length > 0) ||
+          (prev.walkWaypoints.length > 0),
         handheldPlaying: prev.handheldEnabled ? true : prev.handheldPlaying,
       };
     });
   }, []);
 
   const stop = useCallback(() => {
-    elapsedRef.current = 0;
+    sphereElapsedRef.current = 0;
+    walkElapsedRef.current = 0;
     startRef.current = 0;
     setState((prev) => {
-      let trajRig = DEFAULT_CAMERA;
-      if (prev.trajectoryId === CUSTOM_TRAJECTORY_ID && prev.customWaypoints.length) {
-        trajRig = evaluateCustomTrajectory(prev.customWaypoints, 0, prev.customCloseLoop);
-      } else if (prev.trajectoryId === WALK_TRAJECTORY_ID && prev.walkWaypoints.length) {
-        trajRig = evaluateWalkTrajectory(prev.walkWaypoints, 0, prev.walkCloseLoop);
-      }
+      const nextSphereRig =
+        prev.customWaypoints.length > 0
+          ? evaluateCustomTrajectory(prev.customWaypoints, 0, prev.customCloseLoop)
+          : { ...DEFAULT_CAMERA };
+      const nextWalkRig =
+        prev.walkWaypoints.length > 0
+          ? evaluateWalkTrajectory(prev.walkWaypoints, 0, prev.walkCloseLoop)
+          : { ...DEFAULT_CAMERA };
+      const nextTrajRig = combineTrajectoryRig(nextWalkRig, nextSphereRig);
       return {
         ...prev,
+        spherePlaying: false,
+        walkPlaying: false,
         playing: false,
-        trajectoryId: null,
+        sphereProgress: 0,
+        walkProgress: 0,
         progress: 0,
-        trajectoryRig: trajRig,
-        rig: combineRigState(trajRig, prev.handheldEnabled, prev.handheldRig),
+        trajectoryId: null,
+        sphereRig: nextSphereRig,
+        walkRig: nextWalkRig,
+        trajectoryRig: nextTrajRig,
+        rig: combineFinalRig(
+          nextWalkRig,
+          nextSphereRig,
+          prev.handheldEnabled,
+          prev.handheldRig,
+        ),
       };
     });
   }, []);
@@ -948,33 +1173,49 @@ export function useCameraPlayer() {
   const setCustomWaypoints = useCallback(
     (waypoints: SphereWaypoint[]) => {
       setState((prev) => {
-        const isCustomActive = prev.trajectoryId === CUSTOM_TRAJECTORY_ID;
-        let trajRig = prev.trajectoryRig;
+        const sel = prev.selectedSphereWaypointId
+          ? waypoints.find((w) => w.id === prev.selectedSphereWaypointId)
+          : null;
+        let nextSphereRig = prev.sphereRig;
         if (waypoints.length === 0) {
-          trajRig = DEFAULT_CAMERA;
+          nextSphereRig = { ...DEFAULT_CAMERA };
+        } else if (sel) {
+          nextSphereRig = rigFromSpherePoint(sel);
         } else {
-          // If a sphere waypoint is selected, preview that exact waypoint
-          const sel = prev.selectedSphereWaypointId
-            ? waypoints.find((w) => w.id === prev.selectedSphereWaypointId)
-            : null;
-          if (sel) {
-            trajRig = rigFromSpherePoint(sel);
-          } else if (isCustomActive) {
-            trajRig = evaluateCustomTrajectory(
-              waypoints,
-              Math.min(1, Math.max(0, prev.progress)),
-              prev.customCloseLoop,
-            );
-          } else {
-            trajRig = evaluateCustomTrajectory(waypoints, 0, prev.customCloseLoop);
-          }
+          nextSphereRig = evaluateCustomTrajectory(
+            waypoints,
+            Math.min(1, Math.max(0, prev.sphereProgress)),
+            prev.customCloseLoop,
+          );
         }
+        const nextTrajRig = combineTrajectoryRig(prev.walkRig, nextSphereRig);
+        // When sphere waypoints exist, default focused track to sphere — but
+        // never override a running Walk track.
+        const keepFocusWalk = prev.trajectoryId === WALK_TRAJECTORY_ID && prev.walkWaypoints.length > 0;
+        const nextFocusId = keepFocusWalk
+          ? prev.trajectoryId
+          : waypoints.length > 0
+          ? CUSTOM_TRAJECTORY_ID
+          : prev.walkWaypoints.length > 0
+          ? prev.trajectoryId
+          : null;
         return {
           ...prev,
           customWaypoints: waypoints,
-          trajectoryRig: trajRig,
-          rig: combineRigState(trajRig, prev.handheldEnabled, prev.handheldRig),
-          progress: prev.playing ? prev.progress : waypoints.length ? prev.progress : 0,
+          sphereRig: nextSphereRig,
+          trajectoryRig: nextTrajRig,
+          trajectoryId: nextFocusId,
+          sphereProgress: prev.spherePlaying
+            ? prev.sphereProgress
+            : waypoints.length
+            ? prev.sphereProgress
+            : 0,
+          rig: combineFinalRig(
+            prev.walkRig,
+            nextSphereRig,
+            prev.handheldEnabled,
+            prev.handheldRig,
+          ),
         };
       });
     },
@@ -991,14 +1232,22 @@ export function useCameraPlayer() {
       if (!id) return { ...prev, selectedSphereWaypointId: null };
       const wp = prev.customWaypoints.find((w) => w.id === id);
       if (!wp) return prev;
-      const trajRig = rigFromSpherePoint(wp);
+      const nextSphereRig = rigFromSpherePoint(wp);
+      const nextTrajRig = combineTrajectoryRig(prev.walkRig, nextSphereRig);
       return {
         ...prev,
         selectedSphereWaypointId: id,
+        // Don't disturb walk — it can keep running in the background.
+        spherePlaying: false,
         trajectoryId: CUSTOM_TRAJECTORY_ID,
-        playing: false,
-        trajectoryRig: trajRig,
-        rig: combineRigState(trajRig, prev.handheldEnabled, prev.handheldRig),
+        sphereRig: nextSphereRig,
+        trajectoryRig: nextTrajRig,
+        rig: combineFinalRig(
+          prev.walkRig,
+          nextSphereRig,
+          prev.handheldEnabled,
+          prev.handheldRig,
+        ),
       };
     });
   }, []);
@@ -1008,37 +1257,49 @@ export function useCameraPlayer() {
   const setWalkWaypoints = useCallback(
     (waypoints: WalkWaypoint[]) => {
       setState((prev) => {
-        // Activate walk trajectory when waypoints exist so idle sync keeps preview live
-        const shouldActivate = waypoints.length > 0;
-        const nextTrajId = shouldActivate ? WALK_TRAJECTORY_ID : prev.trajectoryId;
-        const nextPlaying = shouldActivate ? false : prev.playing;
-
-        let trajRig = prev.trajectoryRig;
+        const sel = prev.selectedWalkWaypointId
+          ? waypoints.find((w) => w.id === prev.selectedWalkWaypointId)
+          : null;
+        let nextWalkRig = prev.walkRig;
         if (waypoints.length === 0) {
-          trajRig = DEFAULT_CAMERA;
+          nextWalkRig = { ...DEFAULT_CAMERA };
+        } else if (sel) {
+          nextWalkRig = rigFromWalkPoint(sel);
         } else {
-          // If a waypoint is selected, preview that exact waypoint
-          const sel = prev.selectedWalkWaypointId
-            ? waypoints.find((w) => w.id === prev.selectedWalkWaypointId)
-            : null;
-          if (sel) {
-            trajRig = rigFromWalkPoint(sel);
-          } else {
-            trajRig = evaluateWalkTrajectory(
-              waypoints,
-              Math.min(1, Math.max(0, prev.progress)),
-              prev.walkCloseLoop,
-            );
-          }
+          nextWalkRig = evaluateWalkTrajectory(
+            waypoints,
+            Math.min(1, Math.max(0, prev.walkProgress)),
+            prev.walkCloseLoop,
+          );
         }
+        const nextTrajRig = combineTrajectoryRig(nextWalkRig, prev.sphereRig);
+        // Walk gets focus when there are walk waypoints — unless sphere is the
+        // active track (e.g. user is currently tuning Sphere Custom nodes).
+        const keepFocusSphere = prev.trajectoryId === CUSTOM_TRAJECTORY_ID && prev.customWaypoints.length > 0;
+        const nextFocusId = keepFocusSphere
+          ? prev.trajectoryId
+          : waypoints.length > 0
+          ? WALK_TRAJECTORY_ID
+          : prev.customWaypoints.length > 0
+          ? prev.trajectoryId
+          : null;
         return {
           ...prev,
           walkWaypoints: waypoints,
-          trajectoryId: nextTrajId,
-          playing: nextPlaying,
-          trajectoryRig: trajRig,
-          rig: combineRigState(trajRig, prev.handheldEnabled, prev.handheldRig),
-          progress: prev.playing ? prev.progress : waypoints.length ? prev.progress : 0,
+          walkRig: nextWalkRig,
+          trajectoryRig: nextTrajRig,
+          trajectoryId: nextFocusId,
+          walkProgress: prev.walkPlaying
+            ? prev.walkProgress
+            : waypoints.length
+            ? prev.walkProgress
+            : 0,
+          rig: combineFinalRig(
+            nextWalkRig,
+            prev.sphereRig,
+            prev.handheldEnabled,
+            prev.handheldRig,
+          ),
         };
       });
     },
@@ -1055,14 +1316,21 @@ export function useCameraPlayer() {
       if (!id) return { ...prev, selectedWalkWaypointId: null };
       const wp = prev.walkWaypoints.find((w) => w.id === id);
       if (!wp) return prev;
-      const trajRig = rigFromWalkPoint(wp);
+      const nextWalkRig = rigFromWalkPoint(wp);
+      const nextTrajRig = combineTrajectoryRig(nextWalkRig, prev.sphereRig);
       return {
         ...prev,
         selectedWalkWaypointId: id,
+        walkPlaying: false,
         trajectoryId: WALK_TRAJECTORY_ID,
-        playing: false,
-        trajectoryRig: trajRig,
-        rig: combineRigState(trajRig, prev.handheldEnabled, prev.handheldRig),
+        walkRig: nextWalkRig,
+        trajectoryRig: nextTrajRig,
+        rig: combineFinalRig(
+          nextWalkRig,
+          prev.sphereRig,
+          prev.handheldEnabled,
+          prev.handheldRig,
+        ),
       };
     });
   }, []);
@@ -1070,21 +1338,30 @@ export function useCameraPlayer() {
   const playCustomWalk = useCallback(() => {
     setState((prev) => {
       if (prev.walkWaypoints.length === 0) return prev;
-      elapsedRef.current = 0;
+      walkElapsedRef.current = 0;
       startRef.current = 0;
-      const trajRig = evaluateWalkTrajectory(
+      const nextWalkRig = evaluateWalkTrajectory(
         prev.walkWaypoints,
         0,
         prev.walkCloseLoop,
       );
+      const nextTrajRig = combineTrajectoryRig(nextWalkRig, prev.sphereRig);
       return {
         ...prev,
         trajectoryId: WALK_TRAJECTORY_ID,
-        playing: true,
-        progress: 0,
+        walkPlaying: true,
+        spherePlaying: prev.spherePlaying, // leave sphere untouched
+        playing: true || prev.spherePlaying,
+        walkProgress: 0,
         selectedWalkWaypointId: null,
-        trajectoryRig: trajRig,
-        rig: combineRigState(trajRig, prev.handheldEnabled, prev.handheldRig),
+        walkRig: nextWalkRig,
+        trajectoryRig: nextTrajRig,
+        rig: combineFinalRig(
+          nextWalkRig,
+          prev.sphereRig,
+          prev.handheldEnabled,
+          prev.handheldRig,
+        ),
       };
     });
   }, []);
@@ -1101,59 +1378,94 @@ export function useCameraPlayer() {
       handheldSettings?: HandheldSettings,
       walkWaypoints?: WalkWaypoint[],
       walkCloseLoop?: boolean,
+      // Dual-track source-of-truth (new in dual-track snapshots). When
+      // provided they override the legacy single trajectoryId/playing/progress
+      // fields for the focused track. Pass them as named trailing params so
+      // old snapshots (that only pass 9 positional args) remain compatible.
+      spherePlaying?: boolean,
+      sphereProgress?: number,
+      walkPlaying?: boolean,
+      walkProgress?: number,
     ) => {
       setState((prev) => {
         const clampedProgress = Math.min(1, Math.max(0, progress));
         const nextWalkWp = walkWaypoints ?? prev.walkWaypoints;
         const nextWalkLoop = walkCloseLoop ?? prev.walkCloseLoop;
-        let nextTrajId = trajectoryId;
-        if (
-          nextTrajId === CUSTOM_TRAJECTORY_ID &&
-          prev.customWaypoints.length === 0
-        ) {
-          nextTrajId = null;
-        }
-        if (
-          nextTrajId === WALK_TRAJECTORY_ID &&
-          nextWalkWp.length === 0
-        ) {
-          nextTrajId = null;
-        }
-        let trajRig: CameraRig;
-        if (!nextTrajId) {
-          trajRig = DEFAULT_CAMERA;
-        } else if (nextTrajId === CUSTOM_TRAJECTORY_ID) {
-          trajRig = evaluateCustomTrajectory(
-            prev.customWaypoints,
-            clampedProgress,
-            prev.customCloseLoop,
-          );
-        } else if (nextTrajId === WALK_TRAJECTORY_ID) {
-          trajRig = evaluateWalkTrajectory(
-            nextWalkWp,
-            clampedProgress,
-            nextWalkLoop,
-          );
-        } else {
-          trajRig = DEFAULT_CAMERA;
-        }
-        if (nextTrajId) {
-          let duration: number;
-          if (nextTrajId === CUSTOM_TRAJECTORY_ID) {
-            duration = prev.customWaypoints.length <= 1
-              ? 1000
-              : Math.max(3000, prev.customWaypoints.length * 1600);
-          } else if (nextTrajId === WALK_TRAJECTORY_ID) {
-            duration = nextWalkWp.length <= 1
-              ? 1000
-              : Math.max(3000, nextWalkWp.length * 1800);
-          } else {
-            duration = 4000;
-          }
-          elapsedRef.current = clampedProgress * duration;
-        } else {
-          elapsedRef.current = 0;
-        }
+
+        // ---- Decide next per-track play/progress ----
+        // Priority 1: new dual-track fields.
+        // Priority 2: legacy focusedId + playing/progress fallbacks.
+        const focusedId = trajectoryId;
+        const sphereIsFocused = focusedId === CUSTOM_TRAJECTORY_ID;
+        const walkIsFocused = focusedId === WALK_TRAJECTORY_ID;
+
+        const nextSphereProgress =
+          sphereProgress !== undefined
+            ? Math.min(1, Math.max(0, sphereProgress))
+            : sphereIsFocused
+            ? clampedProgress
+            : 0;
+        const nextWalkProgress =
+          walkProgress !== undefined
+            ? Math.min(1, Math.max(0, walkProgress))
+            : walkIsFocused
+            ? clampedProgress
+            : 0;
+
+        const rawNextSpherePlaying =
+          spherePlaying !== undefined
+            ? spherePlaying
+            : sphereIsFocused && playing;
+        const rawNextWalkPlaying =
+          walkPlaying !== undefined
+            ? walkPlaying
+            : walkIsFocused && playing;
+
+        const nextSpherePlaying =
+          rawNextSpherePlaying && prev.customWaypoints.length > 0;
+        const nextWalkPlaying = rawNextWalkPlaying && nextWalkWp.length > 0;
+
+        const selSphere = nextSpherePlaying
+          ? null
+          : prev.selectedSphereWaypointId
+          ? prev.customWaypoints.find((w) => w.id === prev.selectedSphereWaypointId)
+          : null;
+        const selWalk = nextWalkPlaying
+          ? null
+          : prev.selectedWalkWaypointId
+          ? nextWalkWp.find((w) => w.id === prev.selectedWalkWaypointId)
+          : null;
+        const nextSphereRig =
+          selSphere && !nextSpherePlaying
+            ? rigFromSpherePoint(selSphere)
+            : prev.customWaypoints.length > 0
+            ? evaluateCustomTrajectory(
+                prev.customWaypoints,
+                nextSphereProgress,
+                prev.customCloseLoop,
+              )
+            : { ...DEFAULT_CAMERA };
+        const nextWalkRig =
+          selWalk && !nextWalkPlaying
+            ? rigFromWalkPoint(selWalk)
+            : nextWalkWp.length > 0
+            ? evaluateWalkTrajectory(
+                nextWalkWp,
+                nextWalkProgress,
+                nextWalkLoop,
+              )
+            : { ...DEFAULT_CAMERA };
+
+        // Restore per-track elapsed clocks based on focused progress.
+        sphereElapsedRef.current =
+          nextSpherePlaying || nextSphereProgress > 0
+            ? nextSphereProgress * sphereDurationMs(prev.customWaypoints.length)
+            : 0;
+        walkElapsedRef.current =
+          nextWalkPlaying || nextWalkProgress > 0
+            ? nextWalkProgress * walkDurationMs(nextWalkWp.length)
+            : 0;
+
         const nextHHEnabled = handheldEnabled ?? prev.handheldEnabled;
         const nextHHPlaying = handheldPlaying ?? prev.handheldPlaying;
         const nextHHSettings = handheldSettings ?? prev.handheldSettings;
@@ -1162,12 +1474,37 @@ export function useCameraPlayer() {
         const hhRig = nextHHEnabled
           ? evaluateHandheld(nextHHTime, nextHHSettings)
           : { ...DEFAULT_CAMERA };
+
+        const nextTrajRig = combineTrajectoryRig(nextWalkRig, nextSphereRig);
+        const focusProgress =
+          focusedId === WALK_TRAJECTORY_ID
+            ? nextWalkProgress
+            : focusedId === CUSTOM_TRAJECTORY_ID
+            ? nextSphereProgress
+            : 0;
+        // If caller didn't pick a focused id but we have dual-play state,
+        // preserve any existing focused id to keep UI state stable.
+        const nextFocusedId =
+          focusedId ??
+          (nextSpherePlaying && nextWalkPlaying
+            ? prev.trajectoryId
+            : nextWalkPlaying
+            ? WALK_TRAJECTORY_ID
+            : nextSpherePlaying
+            ? CUSTOM_TRAJECTORY_ID
+            : null);
         return {
           ...prev,
-          trajectoryId: nextTrajId,
-          playing: playing && !!nextTrajId,
-          progress: nextTrajId ? clampedProgress : 0,
-          trajectoryRig: trajRig,
+          trajectoryId: nextFocusedId,
+          spherePlaying: nextSpherePlaying,
+          walkPlaying: nextWalkPlaying,
+          playing: nextSpherePlaying || nextWalkPlaying,
+          sphereProgress: nextSphereProgress,
+          walkProgress: nextWalkProgress,
+          progress: focusProgress,
+          sphereRig: nextSphereRig,
+          walkRig: nextWalkRig,
+          trajectoryRig: nextTrajRig,
           walkWaypoints: nextWalkWp,
           walkCloseLoop: nextWalkLoop,
           handheldEnabled: nextHHEnabled,
@@ -1175,7 +1512,7 @@ export function useCameraPlayer() {
           handheldSettings: nextHHSettings,
           handheldTimeMs: nextHHTime,
           handheldRig: hhRig,
-          rig: combineRigState(trajRig, nextHHEnabled, hhRig),
+          rig: combineFinalRig(nextWalkRig, nextSphereRig, nextHHEnabled, hhRig),
         };
       });
     },
@@ -1185,20 +1522,30 @@ export function useCameraPlayer() {
   const playCustomSphere = useCallback(() => {
     setState((prev) => {
       if (prev.customWaypoints.length === 0) return prev;
-      elapsedRef.current = 0;
+      sphereElapsedRef.current = 0;
       startRef.current = 0;
-      const trajRig = evaluateCustomTrajectory(
+      const nextSphereRig = evaluateCustomTrajectory(
         prev.customWaypoints,
         0,
         prev.customCloseLoop,
       );
+      const nextTrajRig = combineTrajectoryRig(prev.walkRig, nextSphereRig);
       return {
         ...prev,
         trajectoryId: CUSTOM_TRAJECTORY_ID,
-        playing: true,
-        progress: 0,
-        trajectoryRig: trajRig,
-        rig: combineRigState(trajRig, prev.handheldEnabled, prev.handheldRig),
+        spherePlaying: true,
+        walkPlaying: prev.walkPlaying, // leave walk running if already on
+        playing: true || prev.walkPlaying,
+        sphereProgress: 0,
+        sphereRig: nextSphereRig,
+        selectedSphereWaypointId: null,
+        trajectoryRig: nextTrajRig,
+        rig: combineFinalRig(
+          prev.walkRig,
+          nextSphereRig,
+          prev.handheldEnabled,
+          prev.handheldRig,
+        ),
       };
     });
   }, []);
@@ -1206,9 +1553,12 @@ export function useCameraPlayer() {
   // Idle sync — keep preview rig in sync with waypoint edits when not playing,
   // so clicking a single node updates the view live.
   useEffect(() => {
-    if (state.playing) return;
-    // Sphere Custom idle sync
-    if (state.trajectoryId === CUSTOM_TRAJECTORY_ID && state.customWaypoints.length > 0) {
+    if (state.spherePlaying && state.walkPlaying) return;
+    let nextSphereRig: CameraRig | null = null;
+    let nextWalkRig: CameraRig | null = null;
+
+    // --- Sphere sync (when paused or selected node) ---
+    if (!state.spherePlaying && state.customWaypoints.length > 0) {
       const selWp = state.selectedSphereWaypointId
         ? state.customWaypoints.find((w) => w.id === state.selectedSphereWaypointId)
         : null;
@@ -1216,27 +1566,22 @@ export function useCameraPlayer() {
         ? rigFromSpherePoint(selWp)
         : evaluateCustomTrajectory(
             state.customWaypoints,
-            state.progress,
+            state.sphereProgress,
             state.customCloseLoop,
           );
       if (
-        Math.abs(target.orbitX - state.trajectoryRig.orbitX) > 0.01 ||
-        Math.abs(target.orbitY - state.trajectoryRig.orbitY) > 0.01 ||
-        Math.abs(target.dolly - state.trajectoryRig.dolly) > 0.002
+        Math.abs(target.orbitX - state.sphereRig.orbitX) > 0.01 ||
+        Math.abs(target.orbitY - state.sphereRig.orbitY) > 0.01 ||
+        Math.abs(target.dolly - state.sphereRig.dolly) > 0.002
       ) {
-        setState((prev) => {
-          const trajRig = target;
-          return {
-            ...prev,
-            trajectoryRig: trajRig,
-            rig: combineRigState(trajRig, prev.handheldEnabled, prev.handheldRig),
-          };
-        });
+        nextSphereRig = target;
       }
+    } else if (state.customWaypoints.length === 0 && state.sphereRig.orbitX !== 0) {
+      nextSphereRig = { ...DEFAULT_CAMERA };
     }
-    // Walk Path idle sync
-    if (state.trajectoryId === WALK_TRAJECTORY_ID && state.walkWaypoints.length > 0) {
-      // If a waypoint is selected, preview that exact waypoint instead of interpolated progress
+
+    // --- Walk sync (when paused or selected node) ---
+    if (!state.walkPlaying && state.walkWaypoints.length > 0) {
       const selWp = state.selectedWalkWaypointId
         ? state.walkWaypoints.find((w) => w.id === state.selectedWalkWaypointId)
         : null;
@@ -1244,25 +1589,34 @@ export function useCameraPlayer() {
         ? rigFromWalkPoint(selWp)
         : evaluateWalkTrajectory(
             state.walkWaypoints,
-            state.progress,
+            state.walkProgress,
             state.walkCloseLoop,
           );
       if (
-        Math.abs(target.orbitX - state.trajectoryRig.orbitX) > 0.01 ||
-        Math.abs(target.orbitY - state.trajectoryRig.orbitY) > 0.01 ||
-        Math.abs(target.panX - state.trajectoryRig.panX) > 0.5 ||
-        Math.abs(target.panY - state.trajectoryRig.panY) > 0.5 ||
-        Math.abs(target.z - state.trajectoryRig.z) > 0.5
+        Math.abs(target.orbitX - state.walkRig.orbitX) > 0.01 ||
+        Math.abs(target.orbitY - state.walkRig.orbitY) > 0.01 ||
+        Math.abs(target.panX - state.walkRig.panX) > 0.5 ||
+        Math.abs(target.panY - state.walkRig.panY) > 0.5 ||
+        Math.abs(target.z - state.walkRig.z) > 0.5
       ) {
-        setState((prev) => {
-          const trajRig = target;
-          return {
-            ...prev,
-            trajectoryRig: trajRig,
-            rig: combineRigState(trajRig, prev.handheldEnabled, prev.handheldRig),
-          };
-        });
+        nextWalkRig = target;
       }
+    } else if (state.walkWaypoints.length === 0 && state.walkRig.panX !== 0) {
+      nextWalkRig = { ...DEFAULT_CAMERA };
+    }
+
+    if (nextSphereRig || nextWalkRig) {
+      setState((prev) => {
+        const walk = nextWalkRig ?? prev.walkRig;
+        const sphere = nextSphereRig ?? prev.sphereRig;
+        return {
+          ...prev,
+          walkRig: walk,
+          sphereRig: sphere,
+          trajectoryRig: combineTrajectoryRig(walk, sphere),
+          rig: combineFinalRig(walk, sphere, prev.handheldEnabled, prev.handheldRig),
+        };
+      });
     }
   }, [
     state.customWaypoints,
@@ -1271,18 +1625,21 @@ export function useCameraPlayer() {
     state.walkCloseLoop,
     state.selectedWalkWaypointId,
     state.selectedSphereWaypointId,
-    state.playing,
-    state.progress,
-    state.trajectoryId,
-    state.trajectoryRig.orbitX,
-    state.trajectoryRig.orbitY,
-    state.trajectoryRig.panX,
-    state.trajectoryRig.panY,
-    state.trajectoryRig.dolly,
-    state.trajectoryRig.z,
+    state.spherePlaying,
+    state.walkPlaying,
+    state.sphereProgress,
+    state.walkProgress,
+    state.sphereRig.orbitX,
+    state.sphereRig.orbitY,
+    state.sphereRig.dolly,
+    state.walkRig.orbitX,
+    state.walkRig.orbitY,
+    state.walkRig.panX,
+    state.walkRig.panY,
+    state.walkRig.z,
   ]);
 
-  // Start the rAF loop whenever *any* motion (trajectory OR handheld) needs it.
+  // Start the rAF loop whenever *any* motion (sphere/walk/HH) needs it.
   useEffect(() => {
     if (needLoop()) {
       cancel();
@@ -1290,7 +1647,15 @@ export function useCameraPlayer() {
       rafRef.current = requestAnimationFrame(tick);
     }
     return cancel;
-  }, [state.playing, state.trajectoryId, state.handheldEnabled, state.handheldPlaying, tick, cancel, needLoop]);
+  }, [
+    state.spherePlaying,
+    state.walkPlaying,
+    state.handheldEnabled,
+    state.handheldPlaying,
+    tick,
+    cancel,
+    needLoop,
+  ]);
 
   useEffect(() => cancel, [cancel]);
 
