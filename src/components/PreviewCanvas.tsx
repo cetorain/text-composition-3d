@@ -272,31 +272,41 @@ const LayerView: React.FC<{
   // --- SVG layer rendering ---
   if (layer.svgContent && layer.svgWidth && layer.svgHeight) {
     const scale = layer.svgScale ?? 1;
-    // IMPORTANT: keep the wrapper at the SVG's *intrinsic* size, then apply
-    // zoom with `transform: scale()` centered on the middle of the graphic.
-    // This is what makes the slider feel like a true "zoom in / zoom out"
-    // control instead of a resize-from-top-left (which visually looked like
-    // the SVG was "moving" across the canvas as the user dragged it).
+    const scaledW = Math.max(1, Math.round(layer.svgWidth * scale));
+    const scaledH = Math.max(1, Math.round(layer.svgHeight * scale));
+    // CRISP VECTOR ZOOM: replace the width/height attributes in the SVG
+    // string with the scaled dimensions. The viewBox stays the same, so the
+    // browser re-renders the vector content at the target resolution —
+    // always crisp, never blurry, at any zoom level.
     //
-    // Transform order: scale FIRST (around center) → apply 3D rotations.
-    // This way the zoomed size affects the 3D bbox uniformly and the
-    // rotational center of the 3D rig remains the graphic's own center.
-    const zoomTransform = `scale(${scale}) ${innerTransform}`;
+    // Previous approach used CSS `transform: scale()` on a fixed-size
+    // container. That caused the browser to rasterize the SVG at its
+    // intrinsic (small) size, create a GPU texture at that size, and then
+    // stretch the texture — producing blurriness when scale > 1.
+    const scaledSvgContent = layer.svgContent
+      .replace(/(<svg[^>]*?)\swidth=["'][^"']*["']/i, `$1 width="${scaledW}"`)
+      .replace(/(<svg[^>]*?)\sheight=["'][^"']*["']/i, `$1 height="${scaledH}"`);
+    // Container is at the scaled size so the browser rasterizes at the
+    // correct resolution. Only 3D rotations remain in the transform — no
+    // scale() — so no texture stretching.
     const svgBlockStyle: React.CSSProperties = {
-      width: layer.svgWidth,
-      height: layer.svgHeight,
-      transform: zoomTransform,
+      width: scaledW,
+      height: scaledH,
+      transform: innerTransform,
       transformStyle: 'preserve-3d',
       transformOrigin: 'center center',
       display: 'block',
       overflow: 'visible',
-      // When scaled > 1, the SVG visually spills outside its intrinsic box;
-      // the wrapper must NOT clip or it will crop the zoomed content.
-      willChange: 'transform',
+    };
+    // Adjust marginTop so the visual center stays at the same canvas
+    // position despite the height change from intrinsic → scaled.
+    const svgWrapperStyle: React.CSSProperties = {
+      ...wrapperStyle,
+      marginTop: topPx - (scaledH - layer.svgHeight) / 2,
     };
     return (
       <div style={outerStyle}>
-        <div style={wrapperStyle}>
+        <div style={svgWrapperStyle}>
           <span
             key={layer.animationKey}
             className={animationCls}
@@ -311,7 +321,7 @@ const LayerView: React.FC<{
               style={svgBlockStyle}
               data-svg-wrapper
               data-svg-scale={scale}
-              dangerouslySetInnerHTML={{ __html: layer.svgContent }}
+              dangerouslySetInnerHTML={{ __html: scaledSvgContent }}
             />
           </span>
         </div>
