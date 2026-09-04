@@ -916,19 +916,6 @@ export default function App() {
   );
 
   /* ---------- Export PNG ---------- */
-  const savedAnimationsRef = useRef<AnimationType[] | null>(null);
-  const savedCameraRef = useRef<{
-    // Legacy compat
-    trajectoryId: string | null;
-    playing: boolean;
-    progress: number;
-    rig: unknown;
-    // Dual-track
-    spherePlaying: boolean;
-    sphereProgress: number;
-    walkPlaying: boolean;
-    walkProgress: number;
-  } | null>(null);
 
   /**
    * Replace url(blob:http...) backgrounds with url(data:...) inline so that
@@ -990,21 +977,29 @@ export default function App() {
     if (!node) return;
     try {
       setExporting(true);
-      // Freeze at the current static frame. Store originals via ref.
-      const snapshot = layers.map((l) => l.animation);
-      savedAnimationsRef.current = snapshot;
-      savedCameraRef.current = {
-        trajectoryId: camera.state.trajectoryId,
-        playing: camera.state.playing,
-        progress: camera.state.progress,
-        rig: camera.state.rig,
-        spherePlaying: camera.state.spherePlaying,
-        sphereProgress: camera.state.sphereProgress,
-        walkPlaying: camera.state.walkPlaying,
-        walkProgress: camera.state.walkProgress,
-      };
-      setLayers((prev) => prev.map((l) => ({ ...l, animation: 'none' })));
-      camera.stop();
+
+      // ---- Freeze at current playback frame ----
+      // 1. Pause camera (don't stop/reset — keep current rig)
+      const wasSphere = camera.state.spherePlaying;
+      const wasWalk = camera.state.walkPlaying;
+      const wasHH = camera.state.handheldPlaying;
+      try { camera.softPause(); } catch { /* noop */ }
+      try { camera.pauseHandheld(); } catch { /* noop */ }
+
+      // 2. Freeze CSS animations: read computed transform/opacity, remove
+      //    animation class, apply values as inline styles so the browser
+      //    stops animating and the frozen visual state persists.
+      const animatedEls = node.querySelectorAll('[class*="anim-"]');
+      const frozen: Array<{ el: Element; cls: string }> = [];
+      animatedEls.forEach((el) => {
+        const computed = window.getComputedStyle(el);
+        const he = el as HTMLElement;
+        frozen.push({ el, cls: el.className });
+        el.className = el.className.replace(/\b(?:anim-\w+)\b/g, '').trim();
+        he.style.transform = computed.transform;
+        he.style.opacity = computed.opacity;
+      });
+
       await new Promise((r) => setTimeout(r, 80));
 
       const restoreBg = await injectDataUrlBackgrounds(node);
@@ -1028,6 +1023,19 @@ export default function App() {
 
       restoreBg();
 
+      // ---- Restore animations ----
+      frozen.forEach(({ el, cls }) => {
+        el.className = cls;
+        (el as HTMLElement).style.transform = '';
+        (el as HTMLElement).style.opacity = '';
+      });
+
+      // ---- Resume camera ----
+      try {
+        if (wasHH) camera.resumeHandheld();
+        if (wasSphere || wasWalk) camera.softResume();
+      } catch { /* noop */ }
+
       const a = document.createElement('a');
       const ts = new Date();
       const pad = (n: number) => n.toString().padStart(2, '0');
@@ -1045,25 +1053,6 @@ export default function App() {
       console.error('PNG export failed', e);
       alert('Export failed. Please try again.');
     } finally {
-      const saved = savedAnimationsRef.current;
-      savedAnimationsRef.current = null;
-      if (saved) {
-        setLayers((prev) =>
-          prev.map((l, i) => ({ ...l, animation: saved[i] ?? l.animation })),
-        );
-      }
-      const savedCam = savedCameraRef.current;
-      savedCameraRef.current = null;
-      if (savedCam) {
-        if (savedCam.spherePlaying) {
-          // eslint-disable-next-line no-unsafe-finally
-          camera.play(CUSTOM_TRAJECTORY_ID);
-        }
-        if (savedCam.walkPlaying) {
-          // eslint-disable-next-line no-unsafe-finally
-          camera.play(WALK_TRAJECTORY_ID);
-        }
-      }
       setExporting(false);
     }
   }, [camera, canvasSize, layers, background]);
@@ -1073,6 +1062,36 @@ export default function App() {
   const downloadSVG = useCallback(async () => {
     setSvgExporting(true);
     try {
+      // ---- Freeze at current playback frame ----
+      // Pause camera to freeze rig at current position
+      const wasSphere = camera.state.spherePlaying;
+      const wasWalk = camera.state.walkPlaying;
+      const wasHH = camera.state.handheldPlaying;
+      try { camera.softPause(); } catch { /* noop */ }
+      try { camera.pauseHandheld(); } catch { /* noop */ }
+
+      // Read current animation state from DOM (computed transform + opacity)
+      const node = canvasRef.current;
+      const frozenAnims: Record<number, { transform: string; opacity: string }> = {};
+      if (node) {
+        const stageWrapper = node.querySelector('[data-stage-wrapper]');
+        if (stageWrapper) {
+          const layerEls = stageWrapper.children;
+          layers.forEach((layer, i) => {
+            if (layer.animation === 'none') return;
+            const layerEl = layerEls[i];
+            if (!layerEl) return;
+            const animEl = layerEl.querySelector('[class*="anim-"]');
+            if (!animEl) return;
+            const computed = window.getComputedStyle(animEl);
+            frozenAnims[i] = {
+              transform: computed.transform,
+              opacity: computed.opacity,
+            };
+          });
+        }
+      }
+
       const orbitCenterPx = { x: canvasSize.width / 2, y: canvasSize.height / 2 };
       const svg = await generateSvg({
         layers,
@@ -1081,7 +1100,15 @@ export default function App() {
         cameraRig: camera.state.rig,
         orbitCenterPx,
         customFonts,
+        frozenAnimations: frozenAnims,
       });
+
+      // ---- Resume camera ----
+      try {
+        if (wasHH) camera.resumeHandheld();
+        if (wasSphere || wasWalk) camera.softResume();
+      } catch { /* noop */ }
+
       const ts = new Date();
       const pad = (n: number) => n.toString().padStart(2, '0');
       const filename =

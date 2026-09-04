@@ -27,6 +27,13 @@ export interface SvgExportConfig {
   cameraRig: CameraRig;
   orbitCenterPx: { x: number; y: number };
   customFonts: CustomFont[];
+  /**
+   * When provided, each entry maps a layer index to its current animation
+   * state (CSS transform + opacity) read from the live DOM.  The SVG will
+   * bake these as inline transforms/opacity instead of emitting CSS animation
+   * keyframes — producing a static SVG frozen at the current playback frame.
+   */
+  frozenAnimations?: Record<number, { transform: string; opacity: string }>;
 }
 
 /* ---------- math helpers ---------- */
@@ -128,6 +135,32 @@ function textAnchorForAlign(align: Align): string {
   return align === 'Left' ? 'start' : align === 'Right' ? 'end' : 'middle';
 }
 
+/* ---------- CSS → SVG transform conversion ---------- */
+
+/**
+ * Convert a CSS computed transform string (e.g. "matrix(0.8, 0, 0, 0.8, 0, 0)")
+ * to an SVG transform string (e.g. "matrix(0.8 0 0 0.8 0 0)").
+ * Returns '' for "none" or unrecognised input.
+ */
+function cssTransformToSvg(css: string): string {
+  if (!css || css === 'none') return '';
+  // CSS 2D matrix: matrix(a, b, c, d, e, f) → SVG: matrix(a b c d e f)
+  const m = css.match(/matrix\(([^)]+)\)/);
+  if (m) {
+    const v = m[1].split(',').map((s) => s.trim());
+    return `matrix(${v.join(' ')})`;
+  }
+  // CSS 3D matrix3d: extract 2D affine part
+  const m3 = css.match(/matrix3d\(([^)]+)\)/);
+  if (m3) {
+    const v = m3[1].split(',').map((s) => s.trim());
+    if (v.length >= 14) {
+      return `matrix(${v[0]} ${v[1]} ${v[4]} ${v[5]} ${v[12]} ${v[13]})`;
+    }
+  }
+  return '';
+}
+
 /* ---------- animation CSS ---------- */
 
 const ANIM_CSS: Record<string, string> = {
@@ -154,7 +187,7 @@ const ANIM_CSS: Record<string, string> = {
 /* ---------- SVG generation ---------- */
 
 export async function generateSvg(config: SvgExportConfig): Promise<string> {
-  const { layers, canvasSize, background, cameraRig, orbitCenterPx, customFonts } = config;
+  const { layers, canvasSize, background, cameraRig, orbitCenterPx, customFonts, frozenAnimations } = config;
   const W = canvasSize.width;
   const H = canvasSize.height;
   const bg = BACKGROUND_COLORS[background];
@@ -190,8 +223,10 @@ export async function generateSvg(config: SvgExportConfig): Promise<string> {
   /* ---- Build layer elements ---- */
   const layerSvgs: string[] = [];
   const usedAnims = new Set<string>();
+  const hasFrozen = !!frozenAnimations;
 
-  for (const layer of layers) {
+  for (let layerIdx = 0; layerIdx < layers.length; layerIdx++) {
+    const layer = layers[layerIdx];
     // --- SVG layer (imported SVG) ---
     if (layer.svgContent) {
       const scale = layer.svgScale ?? 1;
@@ -233,9 +268,15 @@ export async function generateSvg(config: SvgExportConfig): Promise<string> {
     );
     const layerMatrix = `matrix(${la} ${lb} ${lc} ${ld} 0 0)`;
 
-    // Animation class
+    // Animation: use frozen state if available, otherwise CSS animation class
     let animCls = '';
-    if (layer.animation !== 'none') {
+    let frozenTransform = '';
+    let frozenOpacity = '';
+    if (hasFrozen && frozenAnimations![layerIdx]) {
+      const f = frozenAnimations![layerIdx];
+      frozenTransform = cssTransformToSvg(f.transform);
+      frozenOpacity = f.opacity;
+    } else if (layer.animation !== 'none') {
       animCls = `anim-svg-${layer.animation}`;
       usedAnims.add(layer.animation);
     }
@@ -255,15 +296,24 @@ export async function generateSvg(config: SvgExportConfig): Promise<string> {
       .join('');
 
     const animStyle = animCls ? ` class="${animCls}"` : '';
+    const opacityAttr = frozenOpacity && frozenOpacity !== '1' ? ` opacity="${frozenOpacity}"` : '';
+
+    // Wrap with frozen animation transform if present
+    let openTag = `<g transform="${layerMatrix}"${animStyle}${opacityAttr}>`;
+    let closeTag = `</g>`;
+    if (frozenTransform) {
+      openTag = `<g transform="${frozenTransform}"${opacityAttr}><g transform="${layerMatrix}"${animStyle}>`;
+      closeTag = `</g></g>`;
+    }
 
     layerSvgs.push(
-      `<g transform="${layerMatrix}"${animStyle}>` +
+      openTag +
         `<text x="${cx}" y="${firstBaseline}" text-anchor="${anchor}" ` +
         `font-family="${escapeXml(family)}" font-size="${layer.fontSize}" ` +
         `font-weight="${weight}" fill="${layer.color}" ` +
         `letter-spacing="${layer.letterSpacing}px">` +
         `${tspans}</text>` +
-        `</g>`,
+        closeTag,
     );
   }
 
