@@ -1,0 +1,91 @@
+3D Text Poster Design Tool
+==========================
+
+Stack: React 19 + Vite 6 + TypeScript + Tailwind CSS 3 + html-to-image.
+Pure static front-end. No server, no DB.
+
+
+1. System requirements
+----------------------
+- Node.js 18+ (20+ recommended). Check with:  node -v
+- npm 9+ (ships with Node).                npm -v
+- Windows / macOS / Linux all work.
+
+
+2. First run on this machine
+----------------------------
+Open a terminal in THIS project folder (where package.json lives), then:
+
+  1) Install dependencies (once, or after pulling updates):
+       npm install
+
+  2) Start the local dev server:
+       npm run dev
+
+  3) Vite will print a URL, typically:  http://localhost:5173
+     Open it in Chrome / Edge / Firefox / Safari.
+
+  4) To stop the server:  press Ctrl+C in the terminal.
+
+
+3. Build static files (for other computers / deploy)
+----------------------------------------------------
+From this project folder:
+
+  npm run build
+
+Wait for the "built in ...s" message. A folder named `dist/` will appear.
+`dist/` contains the full website as pure static files:
+
+    dist/
+      index.html
+      assets/
+        index-XXXX.css
+        index-XXXX.js
+
+You only need the contents of `dist/` to run the app anywhere else.
+
+
+4. Show the built site on ANY computer
+--------------------------------------
+Because vite.config.ts sets `base: './'`, the static build can be served from
+any folder or sub-path. Pick ONE of the options below.
+
+Option A — Double-click (simplest, but a few browsers may block fonts/CORS):
+    Open dist/index.html directly in the browser.
+
+Option B — Tiny local static server (recommended, works perfectly):
+    Any of these one-liners run from inside the dist/ folder:
+
+      npx serve .                            # requires Node
+      npx http-server . -p 8080              # requires Node
+      python -m http.server 8080             # requires Python 3
+
+    Then open http://localhost:8080 in a browser.
+
+Option C — Put it online:
+    Upload the *contents* of the dist/ folder to any static host:
+      - GitHub Pages / Netlify / Vercel / Cloudflare Pages
+      - Nginx / Apache / IIS
+      - A company intranet static server
+    No server-side runtime is required.
+
+
+5. What each part does
+----------------------
+src/types.ts                    Types, enums, presets, default layers.
+src/App.tsx                     Top-level layout, state, PNG export.
+src/components/ControlPanel.tsx Left side: layers, text editor, 3D, motion, globals.
+src/components/LayerList.tsx    Layer reorder / duplicate / delete / rename.
+src/components/PreviewCanvas.tsx Right side: the actual poster DOM (3D, animations).
+src/components/Slider.tsx       Labeled slider with value readout.
+src/components/SegmentedControl.tsx  Weight / align buttons.
+src/index.css                   Tailwind base + custom motion keyframes.
+
+
+6. Export behaviour
+-------------------
+- "Download PNG" captures the CURRENT static frame of the poster.
+- Running animations are automatically paused during export and resumed after.
+- The PNG uses the exact canvas pixel size you selected (e.g. 1400×2000 for the
+  HD portrait preset). If you want print-quality output, pick the HD preset.
