@@ -53,7 +53,6 @@ export function CameraMotionPanel({ handheld, camera, orbitCenterUi }: CameraMot
     pause,
     stop,
     reset,
-    setLoop,
     setSpeed,
     setCustomWaypoints,
     setCustomCloseLoop,
@@ -1337,12 +1336,6 @@ function WalkEditor({
     const { sx, sy } = proj(px, py, pz);
     return { sx, sy, z: pz };
   }, [waypoints, currentProgress, closeLoop, isWalkActive]);
-
-  const walkDurationLabel = useMemo(() => {
-    const n = waypoints.length;
-    if (n <= 1) return 'static';
-    return `${(Math.max(3000, n * 1800) / 1000).toFixed(1)}s`;
-  }, [waypoints.length]);
 
   return (
     <div className="macos-card mb-4 p-3">
