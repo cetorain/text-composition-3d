@@ -1,0 +1,255 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ======================== Theme variables ======================== */
+:root,
+[data-theme="dark"] {
+  --color-bg-deep: #1e1e1e;
+  --color-bg-panel: #2a2a2a;
+  --color-bg-card: #3a3a3a;
+  --color-bg-card-hover: #424242;
+  --color-bg-input: #1e1e1e;
+  --color-border-soft: #3a3a3a;
+  --color-border-medium: #4a4a4a;
+  --color-border-strong: #6a6a6a;
+  --color-fg-bright: #f5f5f7;
+  --color-fg-muted: #8e8e93;
+  --color-fg-dim: #aeaeb2;
+  --color-accent-blue: #b0b0b0;
+  --slider-track: #5a5a5a;
+  --slider-thumb: #ffffff;
+  --shadow-color: rgba(0,0,0,0.3);
+}
+
+[data-theme="light"] {
+  --color-bg-deep: #e8e8e8;
+  --color-bg-panel: #f0f0f0;
+  --color-bg-card: #ffffff;
+  --color-bg-card-hover: #f5f5f5;
+  --color-bg-input: #ffffff;
+  --color-border-soft: #d1d1d1;
+  --color-border-medium: #b8b8b8;
+  --color-border-strong: #8e8e93;
+  --color-fg-bright: #1d1d1f;
+  --color-fg-muted: #86868b;
+  --color-fg-dim: #6e6e73;
+  --color-accent-blue: #6e6e73;
+  --slider-track: #d1d1d1;
+  --slider-thumb: #ffffff;
+  --shadow-color: rgba(0,0,0,0.12);
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+    background: var(--color-bg-deep);
+    color: var(--color-fg-bright);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  button,
+  input,
+  textarea,
+  select {
+    font-family: inherit;
+  }
+}
+
+@layer components {
+  /* macOS-style grouped card container */
+  .panel-section {
+    @apply px-4 py-3;
+  }
+  /* Level 1 — main section headers: "Layers", "Camera Motion", "Global Settings", etc. */
+  .section-title {
+    @apply mb-2 text-[11px] font-semibold tracking-wide text-fg-dim;
+  }
+  /* Level 2 — subsection headers: "Handheld Shake", "Sphere Custom", "Text Content", etc. */
+  .subsection-title {
+    @apply mb-2 text-[11px] font-semibold tracking-wide text-fg-dim;
+  }
+  .field-label {
+    @apply mb-1 flex items-center justify-between text-[11px] font-medium text-fg-dim;
+  }
+  .field-value {
+    @apply text-[11px] font-mono text-fg-muted;
+  }
+  .input-base {
+    @apply w-full rounded-[8px] border border-border-soft bg-bg-input px-3 py-2 text-[12px] text-fg-bright outline-none transition-colors placeholder:text-fg-muted focus:border-accent-blue;
+  }
+  /* macOS-style buttons — rounded, subtle */
+  .btn {
+    @apply inline-flex h-8 items-center justify-center gap-1.5 rounded-[8px] border border-border-soft bg-bg-card px-3.5 text-[11px] font-medium tracking-wide text-fg-dim transition-all duration-150 hover:bg-bg-card-hover hover:text-fg-bright active:scale-[0.98] disabled:opacity-40 disabled:hover:bg-bg-card disabled:hover:text-fg-dim;
+  }
+  .btn-primary {
+    @apply border-accent-blue bg-accent-blue text-bg-deep hover:border-accent-blue hover:bg-bg-card-hover hover:text-fg-bright;
+  }
+  .btn-ghost {
+    @apply border-transparent bg-transparent hover:border-border-soft hover:bg-bg-card;
+  }
+  .chip {
+    @apply inline-flex items-center rounded-full border border-border-soft bg-bg-card px-2.5 py-0.5 text-[10px] font-medium tracking-wide text-fg-muted;
+  }
+  /* macOS-style slider — taller track, blue thumb */
+  .slider {
+    @apply h-1.5 w-full cursor-pointer appearance-none rounded-full;
+    background: var(--slider-track);
+  }
+  .slider::-webkit-slider-thumb {
+    @apply h-4 w-4 appearance-none rounded-full;
+    background: var(--slider-thumb);
+    box-shadow: 0 1px 3px var(--shadow-color), 0 1px 2px var(--shadow-color);
+  }
+  .slider::-moz-range-thumb {
+    @apply h-4 w-4 appearance-none rounded-full border-0;
+    background: var(--slider-thumb);
+  }
+  /* macOS-style grouped card */
+  .macos-card {
+    @apply rounded-[12px] border border-border-soft bg-bg-card;
+    box-shadow: 0 1px 3px var(--shadow-color), 0 1px 2px var(--shadow-color);
+  }
+  .macos-group {
+    @apply overflow-hidden rounded-[8px] border border-border-soft bg-bg-card;
+  }
+  .macos-group-item {
+    @apply border-b border-border-soft px-3 py-2.5 last:border-b-0;
+  }
+}
+
+/* ======================== Motion animations ======================== */
+@keyframes motion-expand {
+  0% {
+    transform: scale(var(--base-scale, 1));
+    animation-timing-function: cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  40% {
+    transform: scale(calc(var(--base-scale, 1) * 1.35));
+    animation-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  65% {
+    transform: scale(calc(var(--base-scale, 1) * 0.92));
+  }
+  82% {
+    transform: scale(calc(var(--base-scale, 1) * 1.04));
+  }
+  100% {
+    transform: scale(var(--base-scale, 1));
+  }
+}
+@keyframes motion-contract {
+  0% {
+    transform: scale(var(--base-scale, 1));
+    animation-timing-function: cubic-bezier(0.4, 0, 0.6, 1);
+  }
+  40% {
+    transform: scale(calc(var(--base-scale, 1) * 0.65));
+    animation-timing-function: cubic-bezier(0.34, 1.56, 0.64, 1);
+  }
+  68% {
+    transform: scale(calc(var(--base-scale, 1) * 1.06));
+  }
+  85% {
+    transform: scale(calc(var(--base-scale, 1) * 0.98));
+  }
+  100% {
+    transform: scale(var(--base-scale, 1));
+  }
+}
+@keyframes motion-pulse {
+  0%,
+  100% {
+    transform: scale(var(--base-scale, 1));
+  }
+  50% {
+    transform: scale(calc(var(--base-scale, 1) * 1.08));
+  }
+}
+@keyframes motion-sway {
+  0%,
+  100% {
+    transform: translateX(0) rotate(var(--sway-base-z, 0deg));
+  }
+  25% {
+    transform: translateX(-14px) rotate(calc(var(--sway-base-z, 0deg) - 2deg));
+  }
+  75% {
+    transform: translateX(14px) rotate(calc(var(--sway-base-z, 0deg) + 2deg));
+  }
+}
+@keyframes motion-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-16px);
+  }
+}
+@keyframes motion-shake {
+  0%,
+  100% {
+    transform: translate(0, 0);
+  }
+  15% {
+    transform: translate(-4px, 1px);
+  }
+  30% {
+    transform: translate(4px, -1px);
+  }
+  45% {
+    transform: translate(-3px, 2px);
+  }
+  60% {
+    transform: translate(3px, -2px);
+  }
+  75% {
+    transform: translate(-2px, 1px);
+  }
+  90% {
+    transform: translate(2px, -1px);
+  }
+}
+
+.anim-expand {
+  animation: motion-expand 1600ms cubic-bezier(0.2, 0.8, 0.2, 1) infinite both;
+}
+.anim-contract {
+  animation: motion-contract 1600ms cubic-bezier(0.2, 0.8, 0.2, 1) infinite both;
+}
+.anim-pulse {
+  animation: motion-pulse 2.2s ease-in-out infinite;
+}
+.anim-sway {
+  animation: motion-sway 3s ease-in-out infinite;
+}
+.anim-float {
+  animation: motion-float 3.2s ease-in-out infinite;
+}
+.anim-shake {
+  animation: motion-shake 700ms ease-in-out infinite;
+}
+
+/* macOS-style scrollbar — auto-hiding, subtle */
+.thin-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+.thin-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.thin-scroll::-webkit-scrollbar-thumb {
+  background: var(--color-border-medium);
+  border-radius: 8px;
+}
+.thin-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-strong);
+}
