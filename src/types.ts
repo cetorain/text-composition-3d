@@ -67,6 +67,14 @@ export interface TextLayer {
   transform: TextTransform3D;
   animation: AnimationType;
   animationKey: number; // bumps to restart animation if re-clicked
+  /** When present, this layer renders the SVG instead of text. */
+  svgContent?: string;
+  /** Natural (intrinsic) width of the imported SVG, px. 0 when not SVG. */
+  svgWidth?: number;
+  /** Natural (intrinsic) height of the imported SVG, px. 0 when not SVG. */
+  svgHeight?: number;
+  /** Display size multiplier for SVG layers. 1 = native size. */
+  svgScale?: number;
 }
 
 export const CANVAS_PRESETS: CanvasSize[] = [

@@ -342,6 +342,141 @@ export default function App() {
     setSelectedId(newLayer.id);
   }, [layers.length, pushUndo]);
 
+  /** Parse an SVG file into its content string + intrinsic size (with sensible defaults) */
+  const parseSvgFile = useCallback(
+    async (file: File): Promise<{ svg: string; width: number; height: number }> => {
+      const text = await file.text();
+      let w = 200;
+      let h = 200;
+      try {
+        const doc = new DOMParser().parseFromString(text, 'image/svg+xml');
+        const parseErr = doc.querySelector('parsererror');
+        if (parseErr) throw new Error('SVG parse error');
+        const root = doc.querySelector('svg') as SVGSVGElement | null;
+        if (root) {
+          // Try width/height attributes → viewBox → fall back to defaults
+          const vb = root.getAttribute('viewBox')?.trim() || '';
+          let vbW = 0;
+          let vbH = 0;
+          if (vb) {
+            const parts = vb.split(/[\s,]+/).map(Number);
+            if (parts.length === 4 && parts.every((n) => !Number.isNaN(n))) {
+              vbW = parts[2];
+              vbH = parts[3];
+            }
+          }
+          const attrW = root.getAttribute('width');
+          const attrH = root.getAttribute('height');
+          const toPx = (s: string | null): number | null => {
+            if (!s) return null;
+            const n = parseFloat(s);
+            if (Number.isNaN(n)) return null;
+            if (s.endsWith('mm')) return n * 3.78;
+            if (s.endsWith('cm')) return n * 37.8;
+            if (s.endsWith('in')) return n * 96;
+            if (s.endsWith('pt')) return n * 1.333;
+            if (s.endsWith('pc')) return n * 16;
+            return n;
+          };
+          const wPx = toPx(attrW);
+          const hPx = toPx(attrH);
+          if (wPx && hPx) {
+            w = wPx;
+            h = hPx;
+          } else if (vbW && vbH) {
+            // viewBox with no explicit size → assume 1 user-unit = 1px
+            w = vbW;
+            h = vbH;
+          } else if (wPx && vbH) {
+            w = wPx;
+            h = (wPx / vbW) * vbH;
+          } else if (hPx && vbW) {
+            h = hPx;
+            w = (hPx / vbH) * vbW;
+          }
+          // Ensure a minimum sensible size so the SVG is visible on import
+          const maxSide = Math.max(w, h, 1);
+          if (maxSide < 40) {
+            const f = 80 / maxSide;
+            w = Math.round(w * f);
+            h = Math.round(h * f);
+          } else if (maxSide > 800) {
+            // Auto-scale import default so huge SVGs don't overflow canvas
+            const f = 300 / maxSide;
+            w = Math.round(w * f);
+            h = Math.round(h * f);
+          }
+          // Normalize the injected <svg> so its DOM size matches the intrinsic
+          // size (viewBox-based pixels) exactly. The user-facing zoom is then
+          // applied by the renderer via transform:scale(svgScale) with a
+          // center origin, which gives a true "zoom in/out" feel instead of
+          // resizing from the top-left corner (which looked like a "move").
+          //
+          // We also make sure width/height are expressed as plain numbers (no
+          // unit strings like "100%" or "48mm") so when the renderer places
+          // the SVG into a sized wrapper it fills 1:1 without surprises.
+          const cloned = root.cloneNode(true) as SVGSVGElement;
+          // Guarantee a viewBox exists so rendering is always deterministic.
+          if (!cloned.getAttribute('viewBox')) {
+            cloned.setAttribute('viewBox', `0 0 ${w} ${h}`);
+          }
+          cloned.setAttribute('width', `${w}`);
+          cloned.setAttribute('height', `${h}`);
+          cloned.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+          // Let authors keep their own fill/stroke — we avoid injecting
+          // currentColor so brand/gradient SVGs stay visually identical
+          // to the source file after import.
+          const serializer = new XMLSerializer();
+          const svgString = serializer.serializeToString(cloned);
+          return { svg: svgString, width: w, height: h };
+        }
+      } catch (e) {
+        console.warn('[importSvg] parse failed, falling back:', e);
+      }
+      return { svg: text, width: w, height: h };
+    },
+    [],
+  );
+
+  const importSvgLayer = useCallback(
+    async (file: File) => {
+      if (!file || !file.type.includes('svg') && !file.name.toLowerCase().endsWith('.svg')) return;
+      let parsed;
+      try {
+        parsed = await parseSvgFile(file);
+      } catch (e) {
+        console.error('[importSvg] failed:', e);
+        return;
+      }
+      pushUndo();
+      const baseName = file.name.replace(/\.svg$/i, '') || 'SVG';
+      const newLayer: TextLayer = {
+        id: genId(),
+        name: baseName,
+        text: '',
+        fontFamily: DEFAULT_FONT_FAMILY,
+        fontSize: 36,
+        fontWeight: 'Normal',
+        color: '#ffffff',
+        align: 'Center',
+        letterSpacing: DEFAULT_LETTER_SPACING,
+        lineHeight: DEFAULT_LINE_HEIGHT,
+        verticalOffset: 0,
+        horizontalOffset: 0,
+        transform: { rotateX: 0, rotateY: 0, rotateZ: 0, perspective: 900 },
+        animation: 'none',
+        animationKey: 0,
+        svgContent: parsed.svg,
+        svgWidth: parsed.width,
+        svgHeight: parsed.height,
+        svgScale: 1,
+      };
+      setLayers((prev) => [...prev, newLayer]);
+      setSelectedId(newLayer.id);
+    },
+    [parseSvgFile, pushUndo],
+  );
+
   const deleteLayer = useCallback((id: string) => {
     pushUndo();
     setLayers((prev) => {
@@ -1797,6 +1932,7 @@ export default function App() {
           orbitCenterUi={orbitCenterUi}
           onSelect={setSelectedId}
           onAddLayer={addLayer}
+          onImportSvgLayer={importSvgLayer}
           onDeleteLayer={deleteLayer}
           onDuplicateLayer={duplicateLayer}
           onMoveLayerUp={moveLayerUp}

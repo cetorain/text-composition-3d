@@ -266,6 +266,60 @@ const LayerView: React.FC<{
     '--sway-base-z': `${transform.rotateZ}deg`,
   } as React.CSSProperties;
 
+  const animationCls =
+    layer.animation !== 'none' && !paused ? animClass[layer.animation] : '';
+
+  // --- SVG layer rendering ---
+  if (layer.svgContent && layer.svgWidth && layer.svgHeight) {
+    const scale = layer.svgScale ?? 1;
+    // IMPORTANT: keep the wrapper at the SVG's *intrinsic* size, then apply
+    // zoom with `transform: scale()` centered on the middle of the graphic.
+    // This is what makes the slider feel like a true "zoom in / zoom out"
+    // control instead of a resize-from-top-left (which visually looked like
+    // the SVG was "moving" across the canvas as the user dragged it).
+    //
+    // Transform order: scale FIRST (around center) → apply 3D rotations.
+    // This way the zoomed size affects the 3D bbox uniformly and the
+    // rotational center of the 3D rig remains the graphic's own center.
+    const zoomTransform = `scale(${scale}) ${innerTransform}`;
+    const svgBlockStyle: React.CSSProperties = {
+      width: layer.svgWidth,
+      height: layer.svgHeight,
+      transform: zoomTransform,
+      transformStyle: 'preserve-3d',
+      transformOrigin: 'center center',
+      display: 'block',
+      overflow: 'visible',
+      // When scaled > 1, the SVG visually spills outside its intrinsic box;
+      // the wrapper must NOT clip or it will crop the zoomed content.
+      willChange: 'transform',
+    };
+    return (
+      <div style={outerStyle}>
+        <div style={wrapperStyle}>
+          <span
+            key={layer.animationKey}
+            className={animationCls}
+            style={{
+              display: 'inline-block',
+              transformStyle: 'preserve-3d',
+              animationPlayState: paused ? 'paused' : 'running',
+              overflow: 'visible',
+            }}
+          >
+            <div
+              style={svgBlockStyle}
+              data-svg-wrapper
+              data-svg-scale={scale}
+              dangerouslySetInnerHTML={{ __html: layer.svgContent }}
+            />
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  // --- Text layer rendering ---
   const fontFamily = resolveFontFamily(layer.fontFamily, customFonts);
 
   const textBlockStyle: React.CSSProperties = {
@@ -286,12 +340,6 @@ const LayerView: React.FC<{
     width: layer.align === 'Center' ? 'auto' : undefined,
   };
 
-  const animationCls =
-    layer.animation !== 'none' && !paused ? animClass[layer.animation] : '';
-
-  // The animation is applied to a wrapper between outer perspective and inner 3D
-  // rotate, so the motion is additive on top of the 3D transform (except sway,
-  // which merges rotateZ via CSS var). We wrap textBlock inside a motion span.
   return (
     <div style={outerStyle}>
       <div style={wrapperStyle}>

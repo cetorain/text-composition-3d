@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useRef } from 'react';
 import type { TextLayer } from '../types';
 
 interface LayerListProps {
@@ -6,6 +6,7 @@ interface LayerListProps {
   selectedId: string | null;
   onSelect: (id: string) => void;
   onAdd: () => void;
+  onImportSvg: (file: File) => void;
   onDelete: (id: string) => void;
   onDuplicate: (id: string) => void;
   onMoveUp: (id: string) => void;
@@ -18,18 +19,40 @@ export const LayerList: React.FC<LayerListProps> = ({
   selectedId,
   onSelect,
   onAdd,
+  onImportSvg,
   onDelete,
   onDuplicate,
   onMoveUp,
   onMoveDown,
   onRename,
 }) => {
+  const svgInputRef = useRef<HTMLInputElement>(null);
   return (
     <section className="macos-card p-3">
-      <div className="mb-2 flex items-center justify-between">
-        <h3 className="section-title !mb-0">Layers · {layers.length}</h3>
+      <div className="mb-2 flex items-center gap-1.5">
+        <h3 className="section-title !mb-0 flex-1">Layers · {layers.length}</h3>
+        <input
+          ref={svgInputRef}
+          type="file"
+          accept=".svg,image/svg+xml"
+          multiple
+          className="hidden"
+          onChange={(e) => {
+            const files = Array.from(e.target.files ?? []);
+            files.forEach((f) => onImportSvg(f));
+            e.target.value = '';
+          }}
+        />
+        <button
+          type="button"
+          onClick={() => svgInputRef.current?.click()}
+          className="btn h-7 px-2.5 text-[10px]"
+          title="Import SVG file as a new layer"
+        >
+          ↑ SVG
+        </button>
         <button type="button" onClick={onAdd} className="btn h-7 px-2.5 text-[10px]">
-          + Add Layer
+          + Layer
         </button>
       </div>
 
@@ -56,6 +79,14 @@ export const LayerList: React.FC<LayerListProps> = ({
                   <span className="chip !h-5 !py-0 !text-[9px]">
                     {orderIndex + 1}
                   </span>
+                  {!!layer.svgContent && (
+                    <span
+                      className="shrink-0 rounded-macos border border-border-medium bg-bg-card px-1 py-0.5 text-[8px] font-medium uppercase tracking-wider text-fg-muted"
+                      title="SVG layer"
+                    >
+                      svg
+                    </span>
+                  )}
                   <input
                     value={layer.name}
                     onChange={(e) => onRename(layer.id, e.target.value)}

@@ -36,6 +36,7 @@ interface ControlPanelProps {
   customFonts: CustomFont[];
   onSelect: (id: string) => void;
   onAddLayer: () => void;
+  onImportSvgLayer: (file: File) => void;
   onDeleteLayer: (id: string) => void;
   onDuplicateLayer: (id: string) => void;
   onMoveLayerUp: (id: string) => void;
@@ -101,6 +102,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = (props) => {
     customFonts,
     onSelect,
     onAddLayer,
+    onImportSvgLayer,
     onDeleteLayer,
     onDuplicateLayer,
     onMoveLayerUp,
@@ -136,6 +138,7 @@ export const ControlPanel: React.FC<ControlPanelProps> = (props) => {
           selectedId={selectedId}
           onSelect={onSelect}
           onAdd={onAddLayer}
+          onImportSvg={onImportSvgLayer}
           onDelete={onDeleteLayer}
           onDuplicate={onDuplicateLayer}
           onMoveUp={onMoveLayerUp}
@@ -249,6 +252,125 @@ const TextEditor: React.FC<{
   const selectedFont =
     fontOptions.find((f) => f.value === selected.fontFamily) ?? fontOptions[0];
 
+  // -------- SVG layer editor --------
+  if (selected.svgContent && selected.svgWidth && selected.svgHeight) {
+    const scale = selected.svgScale ?? 1;
+    const pct = Math.round(scale * 100);
+    const dispW = Math.round(selected.svgWidth * scale);
+    const dispH = Math.round(selected.svgHeight * scale);
+    return (
+      <section className="macos-card p-3">
+        <h3 className="subsection-title">SVG Content</h3>
+
+        <div className="mb-4 rounded-macos border border-border-soft bg-bg-input p-2.5">
+          <div className="mb-2 flex items-center justify-between text-[10px] text-fg-muted">
+            <span>Preview · native size</span>
+            <span className="font-mono">
+              {selected.svgWidth} × {selected.svgHeight}
+            </span>
+          </div>
+          <div
+            className="flex max-h-36 items-center justify-center overflow-hidden rounded bg-bg-card"
+            style={{ transform: `scale(${Math.min(1, 180 / Math.max(selected.svgWidth, selected.svgHeight))})`, transformOrigin: 'center center' }}
+            dangerouslySetInnerHTML={{ __html: selected.svgContent }}
+          />
+        </div>
+
+        <div className="mb-4">
+          <div className="field-label">
+            <span>Scale</span>
+            <span className="field-value">
+              {pct}% · ×{scale.toFixed(2)}
+            </span>
+          </div>
+          <div className="mb-1">
+            <input
+              type="range"
+              className="slider"
+              min={0.1}
+              max={5}
+              step={0.01}
+              value={scale}
+              onChange={(e) =>
+                onUpdateLayer(id, 'svgScale', clamp(Number(e.target.value), 0.1, 5))
+              }
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={0.1}
+              max={5}
+              step={0.01}
+              value={Number(scale.toFixed(2))}
+              onChange={(e) =>
+                onUpdateLayer(id, 'svgScale', clamp(Number(e.target.value), 0.1, 5))
+              }
+              className="input-base flex-1"
+            />
+            <div className="flex items-center gap-1">
+              {[0.25, 0.5, 1, 2, 4].map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => onUpdateLayer(id, 'svgScale', preset)}
+                  className={[
+                    'btn h-8 px-2 !text-[10px]',
+                    Math.abs(scale - preset) < 0.001 ? 'btn-primary' : '',
+                  ].join(' ')}
+                  title={`Set scale to ${preset}×`}
+                >
+                  {preset < 1 ? `${preset * 100 | 0}%` : `${preset}×`}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="mb-4 grid grid-cols-2 gap-3">
+          <div>
+            <div className="field-label">
+              <span>Scaled Width</span>
+              <span className="field-value">{dispW}px</span>
+            </div>
+            <div className="rounded-macos border border-border-soft bg-bg-input px-2.5 py-1.5 font-mono text-[11px] text-fg-dim">
+              {selected.svgWidth} × {scale.toFixed(2)}
+            </div>
+          </div>
+          <div>
+            <div className="field-label">
+              <span>Scaled Height</span>
+              <span className="field-value">{dispH}px</span>
+            </div>
+            <div className="rounded-macos border border-border-soft bg-bg-input px-2.5 py-1.5 font-mono text-[11px] text-fg-dim">
+              {selected.svgHeight} × {scale.toFixed(2)}
+            </div>
+          </div>
+        </div>
+
+        <Slider
+          label="Vertical Offset"
+          value={selected.verticalOffset}
+          min={-1000}
+          max={1000}
+          step={1}
+          suffix="px"
+          onChange={(v) => onUpdateLayer(id, 'verticalOffset', v)}
+        />
+        <Slider
+          label="Horizontal Offset"
+          value={selected.horizontalOffset}
+          min={-1000}
+          max={1000}
+          step={1}
+          suffix="px"
+          onChange={(v) => onUpdateLayer(id, 'horizontalOffset', v)}
+        />
+      </section>
+    );
+  }
+
+  // -------- Text layer editor (existing) --------
   return (
     <section className="macos-card p-3">
       <h3 className="subsection-title">Text Content</h3>
