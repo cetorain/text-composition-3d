@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toPng, toCanvas } from 'html-to-image';
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import { useCameraPlayer, CUSTOM_TRAJECTORY_ID, WALK_TRAJECTORY_ID, composeRigs, DEFAULT_CAMERA, evaluateCustomTrajectory, evaluateWalkTrajectory, evaluateHandheld } from './camera';
+import { generateSvg, downloadSvg } from './svgExport';
 
 /** CSS animation durations in ms (must match index.css). */
 const ANIM_DURATIONS: Record<string, number> = {
@@ -1067,6 +1068,33 @@ export default function App() {
     }
   }, [camera, canvasSize, layers, background]);
 
+  /* ---------- Export SVG (true vector) ---------- */
+  const [svgExporting, setSvgExporting] = useState(false);
+  const downloadSVG = useCallback(async () => {
+    setSvgExporting(true);
+    try {
+      const orbitCenterPx = { x: canvasSize.width / 2, y: canvasSize.height / 2 };
+      const svg = await generateSvg({
+        layers,
+        canvasSize,
+        background,
+        cameraRig: camera.state.rig,
+        orbitCenterPx,
+        customFonts,
+      });
+      const ts = new Date();
+      const pad = (n: number) => n.toString().padStart(2, '0');
+      const filename =
+        `poster-${canvasSize.id}-${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}` +
+        `-${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}.svg`;
+      downloadSvg(svg, filename);
+    } catch (err) {
+      console.error('SVG export failed:', err);
+    } finally {
+      setSvgExporting(false);
+    }
+  }, [camera, canvasSize, layers, background, customFonts]);
+
   /* ---------- Auto-compute video loop duration ---------- */
   const autoLoopDuration = useMemo(() => {
     const durations: number[] = [];
@@ -2045,15 +2073,24 @@ export default function App() {
               <button
                 type="button"
                 onClick={downloadPNG}
-                disabled={exporting || videoExporting}
+                disabled={exporting || videoExporting || svgExporting}
                 className="btn btn-primary h-10 px-5"
               >
                 {exporting ? 'Exporting…' : 'Download PNG'}
               </button>
               <button
                 type="button"
+                onClick={downloadSVG}
+                disabled={exporting || videoExporting || svgExporting}
+                className="btn btn-primary h-10 px-5"
+                title="Export true vector SVG — infinite zoom, always sharp"
+              >
+                {svgExporting ? 'Exporting…' : 'Download SVG'}
+              </button>
+              <button
+                type="button"
                 onClick={downloadMP4}
-                disabled={exporting || videoExporting}
+                disabled={exporting || videoExporting || svgExporting}
                 className="btn btn-primary h-10 px-5"
                 title={`Auto loop: ${(autoLoopDuration / 1000).toFixed(1)}s`}
               >
