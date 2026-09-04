@@ -271,8 +271,16 @@ const TextEditor: React.FC<{
           </div>
           <div
             className="flex max-h-36 items-center justify-center overflow-hidden rounded bg-bg-card"
-            style={{ transform: `scale(${Math.min(1, 180 / Math.max(selected.svgWidth, selected.svgHeight))})`, transformOrigin: 'center center' }}
-            dangerouslySetInnerHTML={{ __html: selected.svgContent }}
+            dangerouslySetInnerHTML={{
+              __html: (() => {
+                const fit = Math.min(1, 180 / Math.max(selected.svgWidth ?? 200, selected.svgHeight ?? 200));
+                const pw = Math.round((selected.svgWidth ?? 200) * fit);
+                const ph = Math.round((selected.svgHeight ?? 200) * fit);
+                return (selected.svgContent ?? '')
+                  .replace(/(<svg[^>]*?)\swidth=["'][^"']*["']/i, `$1 width="${pw}"`)
+                  .replace(/(<svg[^>]*?)\sheight=["'][^"']*["']/i, `$1 height="${ph}"`);
+              })(),
+            }}
           />
         </div>
 

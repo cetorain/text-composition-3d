@@ -118,41 +118,60 @@ export const PreviewCanvas = forwardRef<HTMLDivElement, PreviewCanvasProps>(
       : null;
 
     const innerPerspectiveStyle: React.CSSProperties = useMemo(
-      () => ({
-        position: 'absolute',
-        inset: 0,
-        // Clip content to the canvas frame.
-        overflow: 'hidden',
-        perspective: `${cameraRig.perspective}px`,
-        // Perspective origin is ALSO pegged to the orbit center so the 3D
-        // projection rays converge on the same anchor. Without this the
-        // headline's text would still orbit at the right position but feel
-        // "warped" because projection was still centered on the middle of
-        // the canvas.
-        perspectiveOrigin: `${orbitCenterPx.x}px ${orbitCenterPx.y}px`,
-      }),
-      [cameraRig.perspective, orbitCenterPx.x, orbitCenterPx.y],
+      () => {
+        const camActive =
+          cameraRig.orbitX !== 0 ||
+          cameraRig.orbitY !== 0 ||
+          cameraRig.orbitZ !== 0 ||
+          cameraRig.dolly !== 1 ||
+          cameraRig.panX !== 0 ||
+          cameraRig.panY !== 0 ||
+          cameraRig.z !== 0;
+        return {
+          position: 'absolute',
+          inset: 0,
+          overflow: 'hidden',
+          // Only set perspective when camera is active. Perspective forces
+          // 3D rendering context which rasterizes child SVGs into GPU
+          // textures. When at rest, omitting it keeps SVGs as pure vector.
+          ...(camActive
+            ? {
+                perspective: `${cameraRig.perspective}px`,
+                perspectiveOrigin: `${orbitCenterPx.x}px ${orbitCenterPx.y}px`,
+              }
+            : {}),
+        };
+      },
+      [cameraRig.perspective, cameraRig.orbitX, cameraRig.orbitY, cameraRig.orbitZ, cameraRig.dolly, cameraRig.panX, cameraRig.panY, cameraRig.z, orbitCenterPx.x, orbitCenterPx.y],
     );
 
     const innerStageStyle: React.CSSProperties = useMemo(() => {
-      // Transform-origin makes rotations + dolly zoom revolve AROUND the
-      // absolute pixel of the headline center, not the canvas midpoint.
-      // Combined with the camera rig panX/panY, it means:
-      //   - headline is the sphere default center in the UI
-      //   - every trajectory waypoint OR built-in preset → orbit literally
-      //     around the headline's current position on the poster
-      //   - move headline via hOffset / vOffset → the orbit pivot follows
-      //     immediately (no rebuild needed, it's a CSS origin change)
+      const camActive =
+        cameraRig.orbitX !== 0 ||
+        cameraRig.orbitY !== 0 ||
+        cameraRig.orbitZ !== 0 ||
+        cameraRig.dolly !== 1 ||
+        cameraRig.panX !== 0 ||
+        cameraRig.panY !== 0 ||
+        cameraRig.z !== 0;
       const transform = `translate3d(${cameraRig.panX}px, ${cameraRig.panY}px, ${cameraRig.z}px) rotateX(${cameraRig.orbitX}deg) rotateY(${cameraRig.orbitY}deg) rotateZ(${cameraRig.orbitZ}deg) scale(${cameraRig.dolly})`;
       return {
         position: 'absolute',
         inset: 0,
         width: '100%',
         height: '100%',
-        transform,
-        transformOrigin: `${orbitCenterPx.x}px ${orbitCenterPx.y}px`,
-        transformStyle: 'preserve-3d',
-        willChange: 'transform',
+        // Only set transform / preserve-3d when the camera is actually
+        // active. When at rest, omitting these properties prevents the
+        // browser from creating a GPU compositing layer that would
+        // rasterize inline SVGs into a fixed-size texture (the main
+        // cause of SVG blurriness in preview).
+        ...(camActive
+          ? {
+              transform,
+              transformOrigin: `${orbitCenterPx.x}px ${orbitCenterPx.y}px`,
+              transformStyle: 'preserve-3d' as const,
+            }
+          : {}),
       };
     }, [
       cameraRig.dolly,
@@ -177,7 +196,6 @@ export const PreviewCanvas = forwardRef<HTMLDivElement, PreviewCanvasProps>(
           position: 'relative',
           overflow: 'hidden',
           transformOrigin: 'top left',
-          willChange: 'transform',
         }}
       >
         {bgImageLayer && (
@@ -231,6 +249,9 @@ const LayerView: React.FC<{
 }> = ({ layer, canvasHeight, customFonts, paused }) => {
   const { transform } = layer;
 
+  const hasLayerRotation =
+    transform.rotateX !== 0 || transform.rotateY !== 0 || transform.rotateZ !== 0;
+
   const outerStyle: React.CSSProperties = useMemo(
     () => ({
       position: 'absolute',
@@ -239,10 +260,16 @@ const LayerView: React.FC<{
       justifyContent: mapJustify(layer.align),
       alignItems: 'center',
       pointerEvents: 'none',
-      perspective: `${transform.perspective}px`,
-      perspectiveOrigin: 'center center',
+      // Only set perspective when the layer has 3D rotation. Perspective
+      // forces a 3D rendering context that rasterizes inline SVGs.
+      ...(hasLayerRotation
+        ? {
+            perspective: `${transform.perspective}px`,
+            perspectiveOrigin: 'center center',
+          }
+        : {}),
     }),
-    [layer.align, transform.perspective],
+    [layer.align, transform.perspective, hasLayerRotation],
   );
 
   // vertical center is at 50% of canvas height; offset is in pixels
@@ -276,27 +303,29 @@ const LayerView: React.FC<{
     const scaledH = Math.max(1, Math.round(layer.svgHeight * scale));
     // CRISP VECTOR ZOOM: replace the width/height attributes in the SVG
     // string with the scaled dimensions. The viewBox stays the same, so the
-    // browser re-renders the vector content at the target resolution —
-    // always crisp, never blurry, at any zoom level.
-    //
-    // Previous approach used CSS `transform: scale()` on a fixed-size
-    // container. That caused the browser to rasterize the SVG at its
-    // intrinsic (small) size, create a GPU texture at that size, and then
-    // stretch the texture — producing blurriness when scale > 1.
+    // browser re-renders the vector content at the target resolution.
     const scaledSvgContent = layer.svgContent
       .replace(/(<svg[^>]*?)\swidth=["'][^"']*["']/i, `$1 width="${scaledW}"`)
       .replace(/(<svg[^>]*?)\sheight=["'][^"']*["']/i, `$1 height="${scaledH}"`);
-    // Container is at the scaled size so the browser rasterizes at the
-    // correct resolution. Only 3D rotations remain in the transform — no
-    // scale() — so no texture stretching.
+    // Only apply 3D transform / preserve-3d when the layer has actual
+    // rotation. When rotation is 0, omitting transform entirely prevents
+    // GPU compositing, keeping the inline SVG as pure vector DOM (sharp at
+    // any zoom). When rotation is active, the GPU will rasterize, but
+    // that's the unavoidable tradeoff of CSS 3D.
+    const hasRotation =
+      transform.rotateX !== 0 || transform.rotateY !== 0 || transform.rotateZ !== 0;
     const svgBlockStyle: React.CSSProperties = {
       width: scaledW,
       height: scaledH,
-      transform: innerTransform,
-      transformStyle: 'preserve-3d',
-      transformOrigin: 'center center',
       display: 'block',
       overflow: 'visible',
+      ...(hasRotation
+        ? {
+            transform: innerTransform,
+            transformStyle: 'preserve-3d' as const,
+            transformOrigin: 'center center',
+          }
+        : {}),
     };
     // Adjust marginTop so the visual center stays at the same canvas
     // position despite the height change from intrinsic → scaled.
@@ -312,7 +341,7 @@ const LayerView: React.FC<{
             className={animationCls}
             style={{
               display: 'inline-block',
-              transformStyle: 'preserve-3d',
+              ...(hasRotation ? { transformStyle: 'preserve-3d' as const } : {}),
               animationPlayState: paused ? 'paused' : 'running',
               overflow: 'visible',
             }}
@@ -342,12 +371,16 @@ const LayerView: React.FC<{
     textAlign: ALIGN_MAP[layer.align] as React.CSSProperties['textAlign'],
     whiteSpace: 'pre', // strict — no auto wrap, only explicit \n
     overflow: 'visible',
-    transform: innerTransform,
-    transformStyle: 'preserve-3d',
-    transformOrigin: 'center center',
     display: 'inline-block',
     maxWidth: 'none',
     width: layer.align === 'Center' ? 'auto' : undefined,
+    ...(hasLayerRotation
+      ? {
+          transform: innerTransform,
+          transformStyle: 'preserve-3d' as const,
+          transformOrigin: 'center center',
+        }
+      : {}),
   };
 
   return (
@@ -358,7 +391,7 @@ const LayerView: React.FC<{
           className={animationCls}
           style={{
             display: 'inline-block',
-            transformStyle: 'preserve-3d',
+            ...(hasLayerRotation ? { transformStyle: 'preserve-3d' as const } : {}),
             animationPlayState: paused ? 'paused' : 'running',
           }}
         >
