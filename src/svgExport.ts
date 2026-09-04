@@ -225,6 +225,16 @@ export async function generateSvg(config: SvgExportConfig): Promise<string> {
   const usedAnims = new Set<string>();
   const hasFrozen = !!frozenAnimations;
 
+  // Check if camera is at rest (no transform needed)
+  const camAtRest =
+    cameraRig.orbitX === 0 &&
+    cameraRig.orbitY === 0 &&
+    cameraRig.orbitZ === 0 &&
+    cameraRig.dolly === 1 &&
+    cameraRig.panX === 0 &&
+    cameraRig.panY === 0 &&
+    cameraRig.z === 0;
+
   for (let layerIdx = 0; layerIdx < layers.length; layerIdx++) {
     const layer = layers[layerIdx];
     // --- SVG layer (imported SVG) ---
@@ -239,16 +249,32 @@ export async function generateSvg(config: SvgExportConfig): Promise<string> {
         layer.transform.rotateY,
         layer.transform.rotateZ,
       );
-      // Position at center, apply rotation, offset to top-left of SVG
-      const xf = `translate(${cx} ${cy}) matrix(${la} ${lb} ${lc} ${ld} 0 0) translate(${-sw / 2} ${-sh / 2})`;
-      // Strip XML declaration / leading whitespace from embedded SVG
-      const inner = layer.svgContent
+      const hasRot = la !== 1 || lb !== 0 || lc !== 0 || ld !== 1;
+      // Keep the <svg> tag intact — preserve viewBox & namespaces.
+      // Use nested <svg> with x/y for positioning, width/height for scaling.
+      // Strip only the XML declaration.
+      let svgStr = layer.svgContent
         .replace(/<\?xml[^>]*\?>/g, '')
-        .replace(/^\s+/, '')
-        // Remove outer <svg> tag wrapper — we'll use our own <g>
-        .replace(/^<svg[^>]*>/, '<g>')
-        .replace(/<\/svg>\s*$/, '</g>');
-      layerSvgs.push(`<g transform="${xf}">${inner}</g>`);
+        .trim();
+      // Replace width/height in the opening <svg> tag with scaled values
+      svgStr = svgStr
+        .replace(/(<svg[^>]*?)\swidth=["'][^"']*["']/i, `$1 width="${sw}"`)
+        .replace(/(<svg[^>]*?)\sheight=["'][^"']*["']/i, `$1 height="${sh}"`);
+      // Add x/y attributes to position the nested SVG (top-left corner)
+      const offsetX = cx - sw / 2;
+      const offsetY = cy - sh / 2;
+      if (hasRot) {
+        // With rotation: wrap in <g> with transform
+        const xf = `translate(${cx} ${cy}) matrix(${la} ${lb} ${lc} ${ld} 0 0) translate(${-sw / 2} ${-sh / 2})`;
+        layerSvgs.push(`<g transform="${xf}">${svgStr}</g>`);
+      } else {
+        // No rotation: use nested <svg> with x/y for crisp vector positioning
+        svgStr = svgStr.replace(
+          /<svg/,
+          `<svg x="${offsetX}" y="${offsetY}"`,
+        );
+        layerSvgs.push(svgStr);
+      }
       continue;
     }
 
@@ -324,13 +350,16 @@ export async function generateSvg(config: SvgExportConfig): Promise<string> {
   }
 
   /* ---- Assemble SVG ---- */
+  const layerContent = layerSvgs.map((s) => `  ${s}`).join('\n');
+  const innerSvg = camAtRest
+    ? layerContent
+    : `<g transform="${camTransform}">\n${layerContent}\n</g>`;
+
   const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
 <style>${fontFaces}${animStyles}</style>
 <rect width="${W}" height="${H}" fill="${bg}"/>
-<g transform="${camTransform}">
-${layerSvgs.map((s) => `  ${s}`).join('\n')}
-</g>
+${innerSvg}
 </svg>`;
 
   return svg;

@@ -1067,8 +1067,16 @@ export default function App() {
       const wasSphere = camera.state.spherePlaying;
       const wasWalk = camera.state.walkPlaying;
       const wasHH = camera.state.handheldPlaying;
+      // Capture the rig BEFORE pausing (state is async, this is the
+      // last-known-good value from the most recent animation tick)
+      const frozenRig = { ...camera.state.rig };
+
       try { camera.softPause(); } catch { /* noop */ }
       try { camera.pauseHandheld(); } catch { /* noop */ }
+
+      // Wait one frame for DOM to settle
+      await new Promise((r) => requestAnimationFrame(() => r(null)));
+      await new Promise((r) => setTimeout(r, 50));
 
       // Read current animation state from DOM (computed transform + opacity)
       const node = canvasRef.current;
@@ -1097,7 +1105,7 @@ export default function App() {
         layers,
         canvasSize,
         background,
-        cameraRig: camera.state.rig,
+        cameraRig: frozenRig,
         orbitCenterPx,
         customFonts,
         frozenAnimations: frozenAnims,
